@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  # ========================================================
+  # 1. Mock Auth Proxy (IT ดูแล)
+  # ทำหน้าที่จำลองระบบ Login/SSO ขององค์กร
+  # ========================================================
+  mock-auth-proxy:
+    image: nginx:alpine
+    container_name: mock-auth-proxy
+    ports:
+      - "8080:80" # User เปิดทดสอบผ่าน http://localhost:8080
+    volumes:
+      - ./auth-proxy/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - dept-app
+    networks:
+      - internal-net
+
+  # ========================================================
+  # 2. Department Application (User & AI พัฒนาที่นี่)
+  # ========================================================
+  dept-app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: dept-app-instance
+    restart: unless-stopped
+    expose:
+      - "3000"
+    networks:
+      - internal-net
+
+  # ========================================================
+  # 3. Department Database (ฐานข้อมูลเฉพาะแผนก)
+  # ========================================================
+  dept-db:
+    image: postgres:15-alpine
+    container_name: dept-local-db
+    environment:
+      POSTGRES_USER: dept_user
+      POSTGRES_PASSWORD: dept_password_local
+      POSTGRES_DB: dept_db
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    networks:
+      - internal-net
+
+networks:
+  internal-net:
+    driver: bridge
+
+volumes:
+  db-data:
