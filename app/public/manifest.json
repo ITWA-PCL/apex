@@ -1,0 +1,19 @@
+{
+  "name": "APEX — ระบบควบคุมงานติดตั้งประตู-หน้าต่าง (Window Asia PCL)",
+  "short_name": "APEX",
+  "description": "ระบบควบคุมงานติดตั้งประตู-หน้าต่างรายช่องเปิด S1–S8 บริษัท วินโดว์ เอเชีย จำกัด (มหาชน)",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f5f2",
+  "theme_color": "#1e4d6b",
+  "orientation": "any",
+  "lang": "th",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

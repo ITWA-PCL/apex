@@ -1,36 +1,82 @@
+/**
+ * =============================================================================
+ * APEX (https://apex.windowasia.com)
+ * Door & Window Installation Control System — Window Asia Public Company Limited
+ * =============================================================================
+ * Architecture:
+ * - Track A (src/security/): ISO/IEC 27001:2022, Window Asia Central IAM v2.9.0
+ *   (Groups A-E), RBAC (10 Roles x 37 Permissions + EXT_DENY), Audit Trail
+ * - Track B (src/workflow/): Business Process Flow (10 Menus, 7 Setup Steps,
+ *   S1-S8), 8-Step Subcontractor Claim Waterfall, POC, Cashflow, Forms F-00..F-18
+ * =============================================================================
+ */
 const express = require('express');
+const path = require('path');
+const db = require('./src/db/postgres');
+const { securityHeadersMiddleware, createRateLimiter } = require('./src/security/headers');
+const { resolveRequestUser } = require('./src/security/rbac');
+const ciamRouter = require('./src/security/ciam');
+const { router: copilotRouter } = require('./src/security/copilot');
+const collectionsRouter = require('./src/workflow/collections-api');
+
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 
-app.use(express.json());
+// 1. ISO/IEC 27001:2022 Security Headers & Rate Limiting
+app.use(securityHeadersMiddleware);
+app.use(createRateLimiter({ windowMs: 60000, maxRequests: 600 }));
 
-// หน้าแรกของระบบ: แสดงตัวตนของผู้ใช้งานที่ส่งมาจาก Mock Auth
-app.get('/', (req, res) => {
-    const userId = req.headers['x-user-id'] || 'Guest';
-    const email = req.headers['x-user-email'] || 'Unknown';
-    const role = req.headers['x-user-role'] || 'No Role';
-    const dept = req.headers['x-user-department'] || 'General';
+// 2. Body Parser (25MB limit to match auth-proxy client_max_body_size for site photos & drawings)
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-    res.send(`
-        <div style="font-family: Arial, sans-serif; padding: 40px; line-height: 1.6;">
-            <h2>🚀 ยินดีต้อนรับเข้าสู่ระบบงานภายใน</h2>
-            <div style="background: #f4f6f8; border-left: 4px solid #0066cc; padding: 15px; margin-bottom: 20px;">
-                <p><strong>รหัสพนักงาน (User ID):</strong> ${userId}</p>
-                <p><strong>อีเมล (Email):</strong> ${email}</p>
-                <p><strong>ตำแหน่ง/สิทธิ์ (Role):</strong> ${role}</p>
-                <p><strong>แผนก (Department):</strong> ${dept}</p>
-            </div>
-            <p>✅ <em>สถานะ: เชื่อมต่อผ่าน IT Security Gateway เรียบร้อย</em></p>
-            <p>💡 เริ่มต้นพัฒนา Business Flow และหน้าจอทำงานของแผนกได้ทันทีในโฟลเดอร์ <code>app/</code></p>
-        </div>
-    `);
+// 3. Resolve User Identity & RBAC Permissions (Central IAM Session / IT Security Gateway X-User-*)
+app.use(resolveRequestUser);
+
+// 4. Health Check Endpoint (Used by Docker & Load Balancers)
+app.get('/api/health', async (req, res) => {
+  const settings = await db.getSystemSettings();
+  res.json({
+    status: 'ok',
+    service: 'apex',
+    domain: settings.app_domain || 'https://apex.windowasia.com',
+    database: db.isUsingPostgres() ? 'postgresql' : 'local-fallback',
+    ciam_v2_9_0: true,
+    user: {
+      id: req.apexUser?.id,
+      role: req.apexUser?.role
+    },
+    timestamp: new Date().toISOString()
+  });
 });
 
-// Endpoint ตัวอย่างสำหรับ API
-app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', service: 'dept-app' });
+// 5. Mount Track A: Central IAM v2.9.0 (Groups A, B, C, D) & Group E AI Copilot
+app.use(ciamRouter);
+app.use(copilotRouter);
+
+// 6. Mount Track B (CFO): 22 Collections Real-Time API, SSE & Financial Engine
+app.use(collectionsRouter);
+
+// 7. Serve PWA Static Assets & Application Shell (app/public)
+const publicDir = path.join(__dirname, 'public');
+app.use(express.static(publicDir));
+
+// Fallback to PWA index.html for client-side routes
+app.get('*', (req, res) => {
+  res.sendFile(path.join(publicDir, 'index.html'));
 });
 
-app.listen(port, () => {
-    console.log(`Department App listening on port ${port}`);
+async function startServer() {
+  await db.initDatabase();
+  app.listen(port, () => {
+    console.log(`=================================================================`);
+    console.log(` 🚀 APEX (apex.windowasia.com) Server listening on port ${port}`);
+    console.log(` 🛡️ Security: ISO/IEC 27001:2022 + Window Asia CIAM v2.9.0 Ready`);
+    console.log(`=================================================================`);
+  });
+}
+
+startServer().catch(err => {
+  console.error('[APEX] Fatal startup error:', err);
+  process.exit(1);
 });

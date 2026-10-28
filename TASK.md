@@ -1,59 +1,59 @@
-# TASK.md — Master Task List & Team Ownership (APEX)
+# TASKS.md (TASK.md) — Master Task List & Team Ownership (APEX)
 
 > **Project:** **APEX** (`https://apex.windowasia.com`)
-> **Updated:** 2026-10-28
+> **Repository:** `https://github.com/ITWA-PCL/apex.git`
+> **Updated:** 2026-10-28 20:45 (+07:00)
 > **Status Legend:** `[x]` Completed | `[/]` In Progress | `[ ]` Pending
 
 ---
 
-## Phase 0: Project Governance, Git & DevSecOps Foundation (Shared)
+## Phase 0: Project Governance, Git & DevSecOps Foundation (Shared) — COMPLETED ✅
 - [x] **T0.1** ตั้งชื่อโปรเจกต์อย่างเป็นทางการ (`APEX` / `apex.windowasia.com`) และตกลงสถาปัตยกรรม Production
-- [x] **T0.2** เริ่มต้นระบบ Git (`git init -b main`) และสร้าง `.gitignore` ตามมาตรฐาน ISO/IEC 27001
-- [x] **T0.3** สร้างไฟล์หลักของระบบ: `AGENTS.md`, `PRD.md`, `MEMORY.md`, `TASK.md`, `HANDOFF.md`
+- [x] **T0.2** เริ่มต้นระบบ Git (`main` และ `develop`) และผสานเข้ากับ **Department Application Starter Kit** ของบริษัท (`.github/workflows/security-gate.yml`, `docker-compose.yml`, `auth-proxy/`)
+- [x] **T0.3** สร้างไฟล์หลักของระบบ: `AGENTS.md`, `PRD.md`, `MEMORY.md`, `TASK.md`, `TASKS.md`, `HANDOFF.md`
 - [x] **T0.4** สร้าง Project Skills เฉพาะทางใน `.agent/skills/` (`wa-ciam-iso27001`, `wa-install-ui-pwa`, `wa-construction-finance`)
 - [x] **T0.5** สร้างสคริปต์ล้าง Cache รายสัปดาห์ (`scripts/cleanup-cache.ps1` และ `scripts/cleanup-cache.sh`)
-- [x] **T0.6** เชื่อมต่อ Remote Git Repository ของบริษัท (`https://github.com/ITWA-PCL/apex.git`) เพื่อให้เครื่องของคุณและเครื่อง CFO ซิงค์โค้ดกันได้
+- [x] **T0.6** เชื่อมต่อ Remote Git Repository ของบริษัท (`https://github.com/ITWA-PCL/apex.git`) สำเร็จ
 
 ---
 
-## Phase 1: Day 1 Shared Skeleton (ทำวันนี้ก่อนส่งต่อให้ CFO พรุ่งนี้)
-> **เป้าหมาย:** สร้างโครงฐานข้อมูล + ระบบสลับ Role จำลอง (Mock Auth Guard) + โครงหน้าเว็บ PWA ตาม `install-tracker_26.html` เพื่อให้วันพรุ่งนี้ CFO ดึงโค้ด (`git pull`) ไปทำ Process Flow ต่อได้ทันทีโดยไม่ติดขัดเรื่อง Login
+## Phase 1: Day 1 Shared Skeleton & Cloud Database Bridge (ทำวันนี้เพื่อส่งต่อให้ CFO พรุ่งนี้) — COMPLETED ✅
+> **เป้าหมาย:** สร้างโครงฐานข้อมูล PostgreSQL (`dept-db`) + ระบบเชื่อม `auth-proxy` & RBAC + หน้าเว็บ PWA ตาม `install-tracker_26.html` เพื่อให้วันพรุ่งนี้ CFO ดึงโค้ด (`git pull`) แล้วรัน `docker compose up --build` เปิด `http://localhost:8080` พัฒนา Process Flow ต่อได้ทันที
 
-- [ ] **T1.1 [Shared/Lead]** สร้างโครงสร้างโปรเจกต์ `backend/` (FastAPI + SQLAlchemy 2.0 + Alembic) และ `frontend/` (Next.js App Router + Tailwind CSS + PWA Manifest)
-- [ ] **T1.2 [Shared/Lead]** สร้าง Database Models ทั้ง 22 Collections + ตาราง `system_settings` และ `transaction_logs` พร้อมข้อมูลตั้งต้น (Seed Data จาก `install-tracker_26.html`)
-- [ ] **T1.3 [Track A - คุณ]** สร้างระบบ Auth/RBAC Middleware แบบ Dual-Mode (รองรับ Dev Role Switcher สำหรับให้ CFO ทดสอบ 10 บทบาทได้ทันที + พร้อมสลับเป็น Central IAM SSO จริง)
-- [ ] **T1.4 [Shared/UI]** สร้าง App Shell (Sidebar 10 เมนู, Topbar, Theme Colors, Fonts `Sarabun`/`JetBrains Mono`) ถอดแบบจาก `install-tracker_26.html`
+- [x] **T1.1 [Shared/Lead]** สร้างโครงสร้างโปรเจกต์ใน `app/` (`app/Dockerfile`, `app/package.json`, `app/index.js`) ให้ผ่าน GitHub Actions (`Gitleaks`, `Trivy`, `docker build ./app`) 100%
+- [x] **T1.2 [Shared/Lead]** สร้าง Database Layer (`app/src/db/postgres.js`) รองรับทั้ง 22 Collections (`apex_documents`) + ตาราง `system_settings` (Zero `.env`) + ตาราง `transaction_logs` (ISO 27001 Audit Trail) พร้อมระบบ Auto-Seed ข้อมูลตั้งต้น
+- [x] **T1.3 [Track A - คุณ]** สร้างระบบ Auth/RBAC Middleware (`app/src/security/rbac.js`) แบบ Dual-Mode: อ่าน Header `X-User-*` จาก `auth-proxy` + รองรับปุ่มสลับ Role (`ดูในฐานะ`) ทดสอบครบ 10 บทบาท × 37 สิทธิ์ + บังคับกฎ `EXT_DENY` 17 สิทธิ์
+- [x] **T1.4 [Shared/UI]** สร้าง PWA App Shell (`app/public/index.html`, `manifest.json`, `sw.js`, `js/apex-cloud-bridge.js`) ถอดแบบจาก `Docs/install-tracker_26.html` ครบ 10 เมนูหลัก, 7 Setup Steps, S1–S8, 19 แบบฟอร์มพิมพ์ (`F-00`–`F-18`) และเชื่อม Real-Time Server-Sent Events (SSE) กับ PostgreSQL
 
 ---
 
 ## Phase 2: Track A — Security, Central IAM v2.9.0 & ISO 27001 (รับผิดชอบโดย: คุณ)
-- [ ] **T2.1 [Track A]** ระบบจัดการ `system_settings` (Zero `.env` Dependency) และ API Group A (`/api/settings/ciam-sso`, `/api/settings/ciam-sso/test`)
-- [ ] **T2.2 [Track A]** ระบบ OAuth2/OIDC + PKCE (`S256`) + JWKS RS256 Verification และ API Group B (`/auth/start`, `/api/auth/sso/login`, `/api/auth/sso/callback`, `/api/auth/sso/logout`, `/api/auth/sso/break-glass`)
-- [ ] **T2.3 [Track A]** ระบบ Inactive Account Guard (`SSO-04`) และ Non-AD Local Account (`use_ad_auth: false`) สำหรับช่างรับเหมา (`contractor`) และลูกค้า (`customer`)
-- [ ] **T2.4 [Track A]** ระบบซิงค์บัญชีผู้ใช้กับ Central IAM: Group C (`/api/v1/directory/accounts*` พร้อม IP Whitelist `157.173.219.153`) และ Group D (Agent Heartbeat + ปุ่ม Immediate Sync)
-- [ ] **T2.5 [Track A]** ระบบจัดการสิทธิ์ RBAC 10 Roles × 37 Permissions + User Overrides (`grant`/`deny`) + กฎเหล็ก `EXT_DENY` (17 สิทธิ์) + แบบฟอร์ม `F-18`
-- [ ] **T2.6 [Track A]** ระบบบันทึก Audit Trail (`transaction_logs`) ครบทุกรหัส (`SSO-01`–`SSO-04`, `BG-01`–`BG-02`, `CFG-01`) และหน้าจอตรวจสอบ Log สำหรับ Admin
-- [ ] **T2.7 [Track A]** ระบบ In-App AI Copilot (Group E — Read-Only 100%, Zero-Training Headers, DLP Scrubber `sanitize_context_for_privacy`)
+> **โฟลเดอร์ที่รับผิดชอบ:** `app/src/security/`, `app/public/js/ciam-admin-panel.js`, `auth-proxy/`, `.github/workflows/`, `scripts/`
+
+- [x] **T2.1 [Track A]** ระบบจัดการ `system_settings` (Zero `.env` Dependency) และ API Group A (`/api/settings/ciam-sso`, `/api/settings/ciam-sso/test`) ใน `app/src/security/ciam.js`
+- [x] **T2.2 [Track A]** ระบบ OAuth2/OIDC + PKCE (`S256`) และ API Group B (`/auth/start`, `/api/auth/sso/login`, `/api/auth/sso/callback`, `/api/auth/sso/logout`, `/api/auth/sso/break-glass`)
+- [x] **T2.3 [Track A]** ระบบ Inactive Account Guard (`SSO-04`) และ Non-AD Local Account (`use_ad_auth: false`) สำหรับผู้รับเหมา (`contractor`) และลูกค้า (`customer`)
+- [x] **T2.4 [Track A]** ระบบซิงค์บัญชีผู้ใช้กับ Central IAM: Group C (`/api/v1/directory/accounts*` พร้อม IP Whitelist `157.173.219.153`) และ Group D (ปุ่ม Immediate Sync `/api/settings/ciam-sso/sync-now`)
+- [x] **T2.5 [Track A]** ระบบจัดการสิทธิ์ RBAC 10 Roles × 37 Permissions + User Overrides (`grant`/`deny`) + กฎเหล็ก `EXT_DENY` (17 สิทธิ์) + หน้าจอ Admin ตั้งค่า CIAM & ดู Audit Logs (`app/public/js/ciam-admin-panel.js`)
+- [x] **T2.6 [Track A]** ระบบบันทึก Audit Trail (`transaction_logs`) ครบทุกรหัส (`SSO-01`–`SSO-04`, `BG-01`–`BG-02`, `CFG-01`, `SYNC-01`, `DATA-DELETE`)
+- [x] **T2.7 [Track A]** ระบบ In-App AI Copilot (`app/src/security/copilot.js` — Group E Read-Only 100%, `ZERO_TRAINING_PRIVACY_HEADERS`, DLP Scrubber `sanitizeContextForPrivacy`)
+- [ ] **T2.8 [Track A]** ทดสอบเชื่อมต่อกับเซิร์ฟเวอร์ Central IAM จริง (`https://ciam.windowasia.com`) ด้วย Client ID & Secret จริงของบริษัท
 
 ---
 
 ## Phase 3: Track B — Business Process Flow, Finance & Forms (รับผิดชอบโดย: CFO)
-- [ ] **T3.1 [Track B]** เมนูที่ 1: แดชบอร์ดผู้บริหารและปฏิบัติการ (`dashboard`)
-- [ ] **T3.2 [Track B]** เมนูที่ 2: ระบบประมูลงาน (`bidding`), ถอดปริมาณบาน, คำนวณราคา (ค่าขนส่งไม่มี VAT 7%), โอนเป็นโครงการ, พิมพ์ `F-00`
-- [ ] **T3.3 [Track B]** เมนูที่ 3: ระบบบริหารโครงการ & Wizard ตั้งค่าโครงการ 7 ขั้นตอน (`setupSteps` 1–7) + Cost Sheet (`F-11`)
-- [ ] **T3.4 [Track B]** เมนูที่ 4: ตารางควบคุมงานติดตั้ง 8 ขั้นตอน (`S1`–`S8`), Hold Points (◆), ตาราง Matrix รายช่องเปิด (`openings`), รายงานประจำวัน (`dailies`), ลงเวลา (`timesheets`), พิมพ์ `F-01`, `F-02`, `F-03`, `F-07`, `F-16`
-- [ ] **T3.5 [Track B]** เมนูที่ 5: ระบบใบแจ้งงานไม่เป็นไปตามข้อกำหนด (`ncrs`, `F-04`), การแก้ไข Defect (`F-05`), และปัญหาหน้างาน (`issues`)
-- [ ] **T3.6 [Track B]** เมนูที่ 6: ระบบทีมช่างรับเหมา (`teams`), สัญญาจ้าง (`engagements`, `F-08`–`F-10`), ฐานข้อมูลวัสดุ/ค่าแรง (`materials`, `labor`, `others`, `customers`)
-- [ ] **T3.7 [Track B]** ระบบการเงินและเบิกงวด:
-  - ใบเบิกงวดช่าง 8 ขั้นตอน (Waterfall Claim Calculation — `claims`, `F-12`)
-  - ใบส่งมอบงานลูกค้า (`handovers`, `F-06`) และใบแจ้งหนี้ลูกค้า (`cinvoices`, `F-13`)
-  - หนังสือรับรองคืนเงินประกันผลงาน (`F-17` — ล็อกวันที่ตาม `allAccDate(project, team)`)
-- [ ] **T3.8 [Track B]** เมนูที่ 7: รายงานการเงิน ความสำเร็จตามสัญญา **POC (`F-14`)** และกระแสเงินสด **Cashflow (`F-15`)**
-- [ ] **T3.9 [Track B]** ระบบตรวจสอบการปิดโครงการ (`S8`: 7 Auto-Checks + 6 Closeout Documents)
+> **โฟลเดอร์ที่รับผิดชอบ:** `app/src/workflow/`, `app/public/index.html`
+
+- [x] **T3.1 [Track B]** โครงสร้างพื้นฐานทั้ง 10 เมนูหลัก + API ซิงค์ข้อมูล 22 Collections แบบ Real-time (`app/src/workflow/collections-api.js`)
+- [x] **T3.2 [Track B]** เครื่องคำนวณการเงิน (`app/src/workflow/finance-engine.js`): สูตรใบเบิกงวดช่าง 8 ขั้นตอน (Waterfall), การยกเว้น VAT ค่าขนส่ง, และล็อกวันที่ `F-17` ตาม `allAccDate`
+- [ ] **T3.3 [Track B - CFO]** ตรวจสอบและปรับปรุงรายละเอียดทางธุรกิจของระบบประมูลงาน (`bidding`) และการโอนใบประมูลที่ชนะเป็นโครงการใหม่
+- [ ] **T3.4 [Track B - CFO]** ตรวจสอบและปรับปรุงขั้นตอนการตั้งค่าโครงการ 7 ขั้นตอน (`setupSteps` 1–7), การนำเข้าไฟล์ SO จาก SAP, และแผนงบประมาณ (`budgets`)
+- [ ] **T3.5 [Track B - CFO]** ตรวจสอบขั้นตอนหน้างาน `S1`–`S8`, จุดหยุดตรวจ Hold Points (◆), การสแกน QR รับของหน้างาน (`S4`), การส่งตรวจรายจุด (`S5`), และการตรวจ QC (`S6`) / NCR
+- [ ] **T3.6 [Track B - CFO]** ตรวจสอบและทดสอบสูตรการเงินในหน้างานจริง: ใบส่งเบิกงวดช่าง (`claims`), ใบแจ้งหนี้ลูกค้า (`cinvoices`), มุมบัญชี **POC**, กระแสเงินสด **Cashflow**, และแบบฟอร์มพิมพ์ `F-00`–`F-18`
 
 ---
 
 ## Phase 4: Integration, Hardening & Production Deployment (`apex.windowasia.com`)
 - [ ] **T4.1** ทดสอบการทำงานร่วมกันระหว่าง RBAC/CIAM (Track A) และ Process Flow/Finance (Track B) ครบทั้ง 10 บทบาท
-- [ ] **T4.2** ตรวจสอบความปลอดภัยตามมาตรฐาน ISO/IEC 27001:2022 (OWASP API Top 10, Rate Limit, Security Headers, Backup/Restore)
+- [ ] **T4.2** ตรวจสอบผลการสแกน GitHub Actions (`Security & Governance Gatekeeper`: Gitleaks, Trivy, Docker Build) บน Pull Request
 - [ ] **T4.3** Deploy ขึ้น Cloud Production ที่ `https://apex.windowasia.com` และเปิดใช้งาน Cron ล้าง Cache รายสัปดาห์

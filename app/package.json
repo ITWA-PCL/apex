@@ -1,12 +1,13 @@
 {
-  "name": "dept-app",
+  "name": "apex-windowasia",
   "version": "1.0.0",
-  "description": "Internal Department Application",
+  "description": "APEX (apex.windowasia.com) - Door & Window Installation Control System for Window Asia PCL",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
   }
 }
