@@ -8,10 +8,11 @@
 
 ## Latest Handoff Status
 
-- **วันที่ / เวลาล่าสุด:** `2026-10-28 16:42 (+07:00)`
+- **วันที่ / เวลาล่าสุด:** `2026-10-28 17:02 (+07:00)`
 - **ผู้ส่งมอบงานล่าสุด:** Lead Security & Core Architect (ร่วมกับ Antigravity AI)
-- **Git Branch ปัจจุบัน:** `main` (เพิ่งเริ่มต้น Repository)
-- **สถานะภาพรวมของโปรเจกต์:** **Phase 0 Completed (Project Governance & Standards Established)**
+- **Git Remote ของบริษัท:** `https://github.com/ITWA-PCL/apex.git`
+- **Git Branch ปัจจุบัน:** `main` และ `develop`
+- **สถานะภาพรวมของโปรเจกต์:** **Phase 0 Completed 100% (Project Governance, Skills & Company Git Connected)**
 
 ### 1. สิ่งที่ทำเสร็จแล้วใน Session นี้ (Completed Work)
 1. **วิเคราะห์เอกสารต้นฉบับครบทั้ง 4 ไฟล์ใน `Docs/`:**
@@ -43,4 +44,4 @@
   3. ผูก Remote Git Repository (GitHub / GitLab) และ Push โค้ดชุดแรกขึ้น Cloud เพื่อให้เครื่อง CFO ดึง (`git pull`) ไปเริ่มทำงานได้ในวันพรุ่งนี้
 
 ### 3. ข้อควรระวัง / สิ่งที่บล็อกอยู่ (Blockers & Warnings)
-- ยังไม่ได้ผูก URL ของ Remote Git (`git remote add origin <URL>`) — เมื่อสร้าง Private Repo บน GitHub หรือ GitLab แล้ว สามารถนำ URL มาผูกได้ทันที
+- ไม่มี Blocker — เชื่อมต่อ Remote Git ของบริษัท (`https://github.com/ITWA-PCL/apex.git`) เรียบร้อยแล้ว พร้อมเริ่ม `Phase 1: Day 1 Shared Skeleton`

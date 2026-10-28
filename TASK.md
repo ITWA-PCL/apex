@@ -12,7 +12,7 @@
 - [x] **T0.3** สร้างไฟล์หลักของระบบ: `AGENTS.md`, `PRD.md`, `MEMORY.md`, `TASK.md`, `HANDOFF.md`
 - [x] **T0.4** สร้าง Project Skills เฉพาะทางใน `.agent/skills/` (`wa-ciam-iso27001`, `wa-install-ui-pwa`, `wa-construction-finance`)
 - [x] **T0.5** สร้างสคริปต์ล้าง Cache รายสัปดาห์ (`scripts/cleanup-cache.ps1` และ `scripts/cleanup-cache.sh`)
-- [ ] **T0.6** เชื่อมต่อ Remote Git Repository (GitHub / GitLab Private Repo) เพื่อให้เครื่องของคุณและเครื่อง CFO ซิงค์โค้ดกันได้
+- [x] **T0.6** เชื่อมต่อ Remote Git Repository ของบริษัท (`https://github.com/ITWA-PCL/apex.git`) เพื่อให้เครื่องของคุณและเครื่อง CFO ซิงค์โค้ดกันได้
 
 ---
 
