@@ -1,0 +1,12 @@
+{
+  "name": "dept-app",
+  "version": "1.0.0",
+  "description": "Internal Department Application",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
