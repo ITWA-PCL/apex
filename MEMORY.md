@@ -16,7 +16,10 @@
    - **Lead Security & Core Architect (คุณ):** ดูแลระบบ Security, Authentication, Central IAM v2.9.0 Integration, RBAC 37 Permissions, Audit Logs (ISO 27001), Infrastructure & Docker Cache Cleanup
    - **Business Process Lead (CFO):** ดูแลระบบ Process Flow (10 เมนูหลัก, 7 Setup Steps, S1–S8), ระบบการเงิน (Waterfall Claims, Customer Invoices, POC, Cashflow), และแบบฟอร์มพิมพ์ F-00 ถึง F-18
    - **การซิงค์โค้ดระหว่างเครื่อง:** เนื่องจากโฟลเดอร์ทำงานอยู่บน Local คนละเครื่อง ทั้งสองฝั่งจะซิงค์โค้ดและไฟล์เอกสาร (`HANDOFF.md`, `TASK.md`, `MEMORY.md`, `PRD.md`) ผ่าน **Git Remote (GitHub / GitLab Private Repo)**
-   - **Day 1 Bootstrap Rule:** ก่อนที่ CFO จะเริ่มเขียน Process Flow ในวันถัดไป เราจะสร้าง **Shared Core Skeleton** (Database Schema + Auth/RBAC Mock Guard + UI Shell ตาม `install-tracker_26.html`) ขึ้น Git ก่อน เพื่อให้ CFO ดึง (`git pull`) ไปพัฒนาต่อได้ทันทีโดยไม่ต้องรอระบบ CIAM จริงเสร็จ 100%
+   - **Day 1 Bootstrap Rule:** โครงสร้าง Shared Core Skeleton (PostgreSQL Schema 22 Collections + Auth/RBAC Guard + UI Shell ตาม `install-tracker_26.html`) พร้อมใช้งานแล้วในโฟลเดอร์ `app/` เพื่อให้ CFO ดึง (`git pull`) ไปพัฒนาต่อได้ทันที
+   - **Mandatory Local Compile Before Push Rule (กฎเหล็กก่อนส่งโค้ดขึ้น Git):**
+     - ทุกครั้งที่แก้ไขโค้ดเสร็จ **ต้องรัน Compile / ทดสอบบนเครื่อง Local ให้แน่ใจว่าไม่มี Error 100%** (เช่น `node --check`, ทดสอบรันแอป/API และทดสอบ Docker build) ก่อนสั่ง `git push` เสมอ
+     - เวลา Push ให้ Push เข้า **Branch ของตัวเอง** (เช่น `feat/sec-*` สำหรับคุณ และ `feat/flow-*` สำหรับ CFO) เพื่อแยกสายงานอย่างปลอดภัย
 3. **การจัดการขยะและ Cache (Weekly Cache Cleanup):**
    - ทุกๆ สัปดาห์ (วันอาทิตย์ เวลา 03:00 น. บนเซิร์ฟเวอร์ หรือรันผ่าน `scripts/cleanup-cache.ps1` / `scripts/cleanup-cache.sh`) ระบบจะล้าง Docker build cache (`docker builder prune`), dangling images, stopped containers, Next.js build cache และ Python cache อัตโนมัติ
 

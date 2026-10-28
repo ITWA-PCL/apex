@@ -14,6 +14,8 @@
 - [x] **T0.4** สร้าง Project Skills เฉพาะทางใน `.agent/skills/` (`wa-ciam-iso27001`, `wa-install-ui-pwa`, `wa-construction-finance`)
 - [x] **T0.5** สร้างสคริปต์ล้าง Cache รายสัปดาห์ (`scripts/cleanup-cache.ps1` และ `scripts/cleanup-cache.sh`)
 - [x] **T0.6** เชื่อมต่อ Remote Git Repository ของบริษัท (`https://github.com/ITWA-PCL/apex.git`) สำเร็จ
+- [x] **T0.7** สร้างระบบบังคับตรวจสอบและ Compile บนเครื่อง Local ก่อน Push (`scripts/verify-local.js` / `npm --prefix app test`)
+- [x] **T0.8** สร้างคู่มือ One-Stop สำหรับ CFO (Non-Tech) และคำสั่งควบคุม Claude Code อัตโนมัติ (`CFO_CLAUDE_CODE_ONBOARDING.md` และ `CLAUDE.md`)
 
 ---
 

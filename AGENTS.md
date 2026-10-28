@@ -17,8 +17,13 @@
 3. **`TASK.md`** — ตรวจสอบรายการงาน (Task List) สถานะงานปัจจุบัน และผู้รับผิดชอบ (Track A vs Track B)
 4. **`PRD.md`** — อ่านขอบเขตระบบ โครงสร้างข้อมูล 22 Collections, 10 เมนูหลัก, 7 ขั้นตอนตั้งค่าโครงการ, 8 ขั้นตอนติดตั้ง (`S1`–`S8`), 19 แบบฟอร์ม (`F-00`–`F-18`) และ 37 สิทธิ์การใช้งาน (RBAC)
 
-> **กฎตอนจบ Session (Mandatory Session Close Protocol):**
-> ก่อนจบการทำงานทุกครั้ง AI Agent ต้องอัปเดตสถานะใน **`TASK.md`** และเขียนสรุปการส่งมอบงานลงใน **`HANDOFF.md`** พร้อมช่วย Commit & Push ขึ้น Git เพื่อให้เครื่องของทีมงานอีกคน (`git pull`) รับงานต่อได้ทันทีโดยไม่หลุดบริบท
+> **กฎตอนจบ Session และการส่งโค้ดขึ้น Git (Mandatory Pre-Push Local Compile & Session Close Protocol):**
+> 1. **ห้าม Push โค้ดที่ยังไม่ได้ Compile/Test บน Local เด็ดขาด:** หลังแก้ไขโค้ดทุกครั้ง ต้องรันตรวจสอบ Syntax, Dependency, และการ Build/Start บนเครื่อง Local (`node --check`, `npm test` / ทดสอบรันเซิร์ฟเวอร์ หรือ `docker build ./app`) จนมั่นใจว่า **ไม่มี Error 100%** ก่อนเสมอ
+> 2. **อัปเดตเอกสารส่งมอบงาน:** ต้องอัปเดตสถานะใน **`TASKS.md`** (และ **`TASK.md`**) พร้อมเขียนสรุปการส่งมอบงานลงใน **`HANDOFF.md`**
+> 3. **Push เข้า Branch ของตัวเอง:**
+>    - **Track A (คุณ — Lead Security & Architect):** Push ขึ้น Branch ของคุณ (เช่น `feat/sec-*` หรือ `develop`)
+>    - **Track B (CFO — Business Process Lead):** Push ขึ้น Branch ของ CFO (เช่น `feat/flow-*` หรือ `develop`)
+>    - ห้าม Push โค้ดที่ยังไม่ผ่านการตรวจรับตรงเข้า `main` โดยไม่ผ่านการตรวจสอบ
 
 ---
 
@@ -34,10 +39,11 @@
   - ระบบ RBAC 10 บทบาท × 37 สิทธิ์ + User Overrides (`grant`/`deny`) + `EXT_DENY` (บล็อก 17 สิทธิ์สำหรับบุคคลภายนอกเสมอ)
   - ระบบ Audit Trail (`transaction_logs`) ตามมาตรฐาน ISO/IEC 27001:2022 (A.8.15)
   - Docker, Nginx/Traefik, CI/CD, และระบบล้าง Cache อัตโนมัติรายสัปดาห์
-- **โฟลเดอร์ที่รับผิดชอบ:**
-  - `backend/app/core/`, `backend/app/middleware/`, `backend/app/modules/auth/`, `backend/app/modules/rbac/`, `backend/app/modules/ciam/`, `backend/app/modules/audit/`, `backend/app/modules/ai_copilot/`
-  - `frontend/src/lib/auth/`, `frontend/src/components/guards/`, `frontend/src/app/(auth)/`, `frontend/src/app/(app)/admin/`
-  - `docker/`, `scripts/`
+- **โฟลเดอร์ที่รับผิดชอบ (Track A — ห้าม Track B แก้ไข):**
+  - `app/src/security/` (`headers.js`, `rbac.js`, `ciam.js`, `copilot.js`)
+  - `app/src/db/` (`postgres.js`)
+  - `app/public/js/ciam-admin-panel.js`, `app/public/js/apex-cloud-bridge.js`
+  - `auth-proxy/`, `.github/workflows/`, `docker-compose.yml`, `scripts/`
 
 ### Track B: Business Process Flow, Financial Engine, Forms & PWA UI (CFO — Business Process Lead)
 - **ความรับผิดชอบหลัก:**
@@ -45,10 +51,9 @@
   - ระบบประมูลราคา (Bidding), งบประมาณ (Budget/Cost Sheet), ประเมินราคาทีมช่าง, ตรวจรับงาน (QC/Hold Points), NCR
   - ระบบการเงิน: ใบเบิกงวดช่าง 8 ขั้นตอน (Waterfall Claim Calculation), ใบแจ้งหนี้ลูกค้า (Customer Invoice), รายงานความสำเร็จตามสัญญา (POC / Percentage of Completion), กระแสเงินสด (Cashflow), หนังสือรับรองคืนเงินประกันผลงาน (`F-17`)
   - ระบบพิมพ์เอกสารมาตรฐาน 19 แบบฟอร์ม (`F-00` ถึง `F-18`)
-- **โฟลเดอร์ที่รับผิดชอบ:**
-  - `backend/app/modules/bidding/`, `backend/app/modules/projects/`, `backend/app/modules/openings/`, `backend/app/modules/qc_ncr/`, `backend/app/modules/teams/`, `backend/app/modules/claims/`, `backend/app/modules/finance/`, `backend/app/modules/reports/`
-  - `frontend/src/app/(app)/dashboard/`, `frontend/src/app/(app)/bidding/`, `frontend/src/app/(app)/projects/`, `frontend/src/app/(app)/install/`, `frontend/src/app/(app)/ncr/`, `frontend/src/app/(app)/teams/`, `frontend/src/app/(app)/reports/`, `frontend/src/app/(app)/manual/`
-  - `frontend/src/components/forms/` (`F-00` ถึง `F-18`)
+- **โฟลเดอร์ที่รับผิดชอบ (Track B — พื้นที่ทำงานของ CFO & Claude Code):**
+  - `app/src/workflow/` (`finance-engine.js`, `collections-api.js`)
+  - `app/public/index.html` (หน้าจอ UI/UX 10 เมนูหลัก, Flow S1–S8, และแบบฟอร์ม `F-00` ถึง `F-18`)
 
 ### Git Branching Rules
 - `main`: โค้ดสำหรับขึ้น Production (`apex.windowasia.com`) เท่านั้น
