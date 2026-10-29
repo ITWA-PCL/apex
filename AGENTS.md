@@ -3,6 +3,7 @@
 > **Project Name:** **APEX** (ระบบควบคุมงานติดตั้งประตู-หน้าต่าง — Door & Window Installation Control System)
 > **Organization:** บริษัท วินโดว์ เอเชีย จำกัด (มหาชน) — Window Asia Public Company Limited
 > **Production Domain:** `https://apex.windowasia.com`
+> **Standard Local Workspace Path:** `D:\Python\APEX`
 > **CIAM Spoke App Code:** `apex`
 > **Security Standard:** ISO/IEC 27001:2022 & Window Asia Central IAM (CIAM) v2.9.0
 

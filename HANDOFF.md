@@ -8,12 +8,13 @@
 
 ## Latest Handoff Status
 
-- **วันที่ / เวลาล่าสุด:** `2026-10-28 21:35 (+07:00)`
+- **วันที่ / เวลาล่าสุด:** `2026-10-29 14:36 (+07:00)`
 - **ผู้ส่งมอบงานล่าสุด:** Lead Security & Core Architect (ร่วมกับ Antigravity AI)
+- **ชื่อโปรเจกต์หลัก:** **APEX** (`https://apex.windowasia.com`)
+- **โฟลเดอร์หลักของโปรเจกต์บนเครื่อง Local (คุณ & CFO):** **`D:\Python\APEX`**
 - **Git Remote ของบริษัท:** `https://github.com/ITWA-PCL/apex.git`
 - **Git Branch ปัจจุบัน:** `feat/sec-ciam-core` (Branch ของคุณ) และซิงค์เข้า `develop` / `main`
-- **โฟลเดอร์มาตรฐานบนเครื่อง CFO:** `D:\Python\APEX`
-- **สถานะภาพรวมของโปรเจกต์:** **Phase 1, Track A Core & CFO Auto-Installer Onboarding Completed — ผ่านการ Compile ทดสอบบน Local 100%!**
+- **สถานะภาพรวมของโปรเจกต์:** **Phase 1, Track A Core & Local Folder Standardization (`D:\Python\APEX`) Completed — ผ่านการ Compile ทดสอบบน Local 100%!**
 
 ### 1. สิ่งที่ทำเสร็จแล้วใน Session นี้ (Completed Work)
 1. **ผสานโครงสร้างกับ Department Application Starter Kit ของบริษัท (`ITWA-PCL/apex`):**

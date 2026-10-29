@@ -4,10 +4,10 @@
 > **องค์กร (Owner):** บริษัท วินโดว์ เอเชีย จำกัด (มหาชน) — Window Asia Public Company Limited
 > **เว็บไซต์ (Production URL):** `https://apex.windowasia.com`
 > **เอกสารอ้างอิงต้นฉบับใน `Docs/`:**
-> 1. [install-tracker_26.html](file:///D:/Python/PurposeSystem/Docs/install-tracker_26.html) (UI/UX & Functional Mockup ต้นฉบับ)
-> 2. [สรุประบบควบคุมงานติดตั้ง_สำหรับทำอินโฟกร.md](file:///D:/Python/PurposeSystem/Docs/%E0%B8%AA%E0%B8%A3%E0%B8%B8%E0%B8%9B%E0%B8%A3%E0%B8%B0%E0%B8%9A%E0%B8%9A%E0%B8%84%E0%B8%A7%E0%B8%9A%E0%B8%84%E0%B8%B8%E0%B8%A1%E0%B8%87%E0%B8%B2%E0%B8%99%E0%B8%95%E0%B8%B4%E0%B8%94%E0%B8%95%E0%B8%B1%E0%B9%89%E0%B8%87_%E0%B8%AA%E0%B8%B3%E0%B8%AB%E0%B8%A3%E0%B8%B1%E0%B8%9A%E0%B8%97%E0%B8%B3%E0%B8%AD%E0%B8%B4%E0%B8%99%E0%B9%82%E0%B8%9F%E0%B8%81%E0%B8%A3.md)
-> 3. [สรุประบบควบคุมงานติดตั้ง_สำหรับผู้บริหาร_.md](file:///D:/Python/PurposeSystem/Docs/%E0%B8%AA%E0%B8%A3%E0%B8%B8%E0%B8%9B%E0%B8%A3%E0%B8%B0%E0%B8%9A%E0%B8%9A%E0%B8%84%E0%B8%A7%E0%B8%9A%E0%B8%84%E0%B8%B8%E0%B8%A1%E0%B8%87%E0%B8%B2%E0%B8%99%E0%B8%95%E0%B8%B4%E0%B8%94%E0%B8%95%E0%B8%B1%E0%B9%89%E0%B8%87_%E0%B8%AA%E0%B8%B3%E0%B8%AB%E0%B8%A3%E0%B8%B1%E0%B8%9A%E0%B8%9C%E0%B8%B9%E0%B9%89%E0%B8%9A%E0%B8%A3%E0%B8%B4%E0%B8%AB%E0%B8%B2%E0%B8%A3_.md)
-> 4. [CIAM_SPOKE_ENTERPRISE_INTEGRATION_SPECIFICATION_v2.9.0.md](file:///D:/Python/PurposeSystem/Docs/CIAM_SPOKE_ENTERPRISE_INTEGRATION_SPECIFICATION_v2.9.0.md)
+> 1. [install-tracker_26.html](file:///D:/Python/APEX/Docs/install-tracker_26.html) (UI/UX & Functional Mockup ต้นฉบับ)
+> 2. [สรุประบบควบคุมงานติดตั้ง_สำหรับทำอินโฟกร.md](file:///D:/Python/APEX/Docs/%E0%B8%AA%E0%B8%A3%E0%B8%B8%E0%B8%9B%E0%B8%A3%E0%B8%B0%E0%B8%9A%E0%B8%9A%E0%B8%84%E0%B8%A7%E0%B8%9A%E0%B8%84%E0%B8%B8%E0%B8%A1%E0%B8%87%E0%B8%B2%E0%B8%99%E0%B8%95%E0%B8%B4%E0%B8%94%E0%B8%95%E0%B8%B1%E0%B9%89%E0%B8%87_%E0%B8%AA%E0%B8%B3%E0%B8%AB%E0%B8%A3%E0%B8%B1%E0%B8%9A%E0%B8%97%E0%B8%B3%E0%B8%AD%E0%B8%B4%E0%B8%99%E0%B9%82%E0%B8%9F%E0%B8%81%E0%B8%A3.md)
+> 3. [สรุประบบควบคุมงานติดตั้ง_สำหรับผู้บริหาร_.md](file:///D:/Python/APEX/Docs/%E0%B8%AA%E0%B8%A3%E0%B8%B8%E0%B8%9B%E0%B8%A3%E0%B8%B0%E0%B8%9A%E0%B8%9A%E0%B8%84%E0%B8%A7%E0%B8%9A%E0%B8%84%E0%B8%B8%E0%B8%A1%E0%B8%87%E0%B8%B2%E0%B8%99%E0%B8%95%E0%B8%B4%E0%B8%94%E0%B8%95%E0%B8%B1%E0%B9%89%E0%B8%87_%E0%B8%AA%E0%B8%B3%E0%B8%AB%E0%B8%A3%E0%B8%B1%E0%B8%9A%E0%B8%9C%E0%B8%B9%E0%B9%89%E0%B8%9A%E0%B8%A3%E0%B8%B4%E0%B8%AB%E0%B8%B2%E0%B8%A3_.md)
+> 4. [CIAM_SPOKE_ENTERPRISE_INTEGRATION_SPECIFICATION_v2.9.0.md](file:///D:/Python/APEX/Docs/CIAM_SPOKE_ENTERPRISE_INTEGRATION_SPECIFICATION_v2.9.0.md)
 
 ---
 
