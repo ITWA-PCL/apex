@@ -36,7 +36,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
 
 const connectionString =
   process.env.DATABASE_URL ||
-  'postgresql://dept_user:dept_password_local@dept-db:5432/dept_db';
+  'postgresql://apex:apex_password@postgres:5432/apex';
 
 let pool = null;
 let usePostgres = false;

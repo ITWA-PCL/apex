@@ -8,10 +8,11 @@
 
 ## Latest Handoff Status (จุดพักงานล่าสุด — พร้อมกลับมาทำต่อได้ทันที)
 
-- **วันที่ / เวลาบันทึกส่งมอบ:** `2026-10-30 10:52 (+07:00)`
+- **วันที่ / เวลาบันทึกส่งมอบ:** `2026-10-30 21:12 (+07:00)`
 - **ผู้ส่งมอบงานล่าสุด:** Lead Security & Core Architect (คุณ — Track A ร่วมกับ Antigravity AI)
 - **ชื่อโปรเจกต์หลัก:** **APEX** (`https://apex.windowasia.com` — ระบบควบคุมงานติดตั้งประตู-หน้าต่าง)
 - **โฟลเดอร์หลักของโปรเจกต์บนเครื่อง Local (ทั้งเครื่องคุณและเครื่อง CFO):** **`D:\Python\APEX`**
+- **โฟลเดอร์ Production บน Hostinger VPS:** **`/var/www/Apex`**
 - **Git Remote ของบริษัท:** `https://github.com/ITWA-PCL/apex.git`
 - **Git Branch ล่าสุด:**
   - Branch ของคุณ (Track A): `feat/sec-ciam-core`

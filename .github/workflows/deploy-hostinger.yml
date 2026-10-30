@@ -1,0 +1,50 @@
+name: Deploy APEX to Hostinger VPS (/var/www/Apex)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  verify-and-deploy:
+    name: Verify Code & Deploy to Hostinger VPS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 2. Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 3. Install Dependencies & Run Pre-Deploy Verification Suite
+        run: |
+          npm --prefix app ci
+          node scripts/verify-local.js
+
+      - name: 4. Auto-Deploy to Hostinger VPS (/var/www/Apex) via SSH
+        if: ${{ secrets.VPS_HOST != '' && secrets.VPS_USER != '' && secrets.VPS_SSH_KEY != '' }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script_stop: true
+          script: |
+            if [ ! -d "/var/www/Apex/.git" ]; then
+              mkdir -p /var/www
+              git clone https://github.com/ITWA-PCL/apex.git /var/www/Apex
+            fi
+            cd /var/www/Apex
+            bash scripts/deploy-vps.sh
+
+      - name: 5. Notice when SSH Secrets are not configured yet
+        if: ${{ secrets.VPS_HOST == '' }}
+        run: |
+          echo "ℹ️ GitHub Secret VPS_HOST is not configured yet."
+          echo "You can either add VPS_HOST, VPS_USER, VPS_SSH_KEY in GitHub Repo Settings -> Secrets,"
+          echo "or SSH into Hostinger VPS manually and run: cd /var/www/Apex && bash scripts/deploy-vps.sh"
