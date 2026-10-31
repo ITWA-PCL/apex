@@ -31,6 +31,8 @@ const DEFAULT_SYSTEM_SETTINGS = {
   ai_provider_url: 'https://api.openai.com/v1/chat/completions',
   ai_api_key: '',
   ai_model_name: 'gpt-4o-mini',
+  admin_local_password: 'Apex@2026',
+  require_login: 'true',
   last_directory_sync_at: ''
 };
 

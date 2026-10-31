@@ -134,7 +134,9 @@ async function resolveRequestUser(req, res, next) {
     const roles = await db.getCollection('roles');
 
     let matchedUser = null;
+    let isAuthenticated = false;
     if (sessionData) {
+      isAuthenticated = true;
       matchedUser = users.find(
         u =>
           u.id === sessionData.userId ||
@@ -142,6 +144,7 @@ async function resolveRequestUser(req, res, next) {
           (u.email && u.email.toLowerCase() === (sessionData.email || '').toLowerCase())
       );
     } else if (gatewayUserId || gatewayEmail) {
+      isAuthenticated = true;
       matchedUser = users.find(
         u =>
           u.uid === gatewayUserId ||
@@ -168,9 +171,10 @@ async function resolveRequestUser(req, res, next) {
     const canWrite = perms.some(k => !k.startsWith('view.') && k !== 'fin');
     const canFin = perms.includes('fin');
 
+    req.apexAuthenticated = isAuthenticated;
     req.apexUser = {
       id: effectiveUser?.id || gatewayUserId || 'U01',
-      uid: effectiveUser?.uid || gatewayUserId || 'EMP-1001',
+      uid: effectiveUser?.uid || effectiveUser?.id || gatewayUserId || 'U01',
       name: effectiveUser?.name || 'ผู้ดูแลระบบ (IT Gateway)',
       email: effectiveUser?.email || gatewayEmail || 'u01@windowasia.co.th',
       role: effectiveUser?.role || 'admin',
@@ -185,6 +189,7 @@ async function resolveRequestUser(req, res, next) {
       permissions: perms,
       canWrite,
       canFin,
+      authenticated: isAuthenticated,
       realUserId: matchedUser?.id || 'U01'
     };
 

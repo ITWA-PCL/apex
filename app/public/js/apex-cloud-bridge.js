@@ -62,7 +62,11 @@
       if (Array.isArray(list)) {
         list.forEach((doc, idx) => {
           const id = String(doc.id || doc.code || doc.no || `d_${idx + 1}`);
-          colMap[id] = { ...doc, id };
+          const normalized = { ...doc, id };
+          if (col === 'users' && !normalized.uid) {
+            normalized.uid = id;
+          }
+          colMap[id] = normalized;
         });
       }
       store[col] = colMap;
@@ -247,7 +251,7 @@
   const userAdapter = {
     id: async () => {
       await bootstrapCloudStore();
-      return currentUser?.uid || currentUser?.id || 'EMP-1001';
+      return currentUser?.uid || currentUser?.id || 'U01';
     },
     can: async () => {
       await bootstrapCloudStore();

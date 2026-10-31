@@ -62,7 +62,10 @@ router.get('/api/settings/ciam-sso', async (req, res) => {
       ai_copilot_enabled: s.ai_copilot_enabled === 'true',
       ai_provider_url: s.ai_provider_url,
       ai_model_name: s.ai_model_name,
+      ai_api_key_masked: maskSecret(s.ai_api_key),
       has_ai_api_key: Boolean(s.ai_api_key),
+      require_login: s.require_login !== 'false',
+      admin_local_password_masked: maskSecret(s.admin_local_password || 'Apex@2026'),
       last_directory_sync_at: s.last_directory_sync_at || null,
       database_mode: db.isUsingPostgres() ? 'postgresql' : 'local-fallback'
     });
@@ -96,6 +99,7 @@ router.post('/api/settings/ciam-sso', async (req, res) => {
     if (body.ciam_enabled !== undefined) updates.ciam_enabled = String(Boolean(body.ciam_enabled));
     if (body.break_glass_enabled !== undefined) updates.break_glass_enabled = String(Boolean(body.break_glass_enabled));
     if (body.ai_copilot_enabled !== undefined) updates.ai_copilot_enabled = String(Boolean(body.ai_copilot_enabled));
+    if (body.require_login !== undefined) updates.require_login = String(Boolean(body.require_login));
 
     if (body.ciam_client_secret && !body.ciam_client_secret.includes('••••')) {
       updates.ciam_client_secret = String(body.ciam_client_secret).trim();
@@ -105,6 +109,9 @@ router.post('/api/settings/ciam-sso', async (req, res) => {
     }
     if (body.ai_api_key && !body.ai_api_key.includes('••••')) {
       updates.ai_api_key = String(body.ai_api_key).trim();
+    }
+    if (body.admin_local_password && !body.admin_local_password.includes('••••')) {
+      updates.admin_local_password = String(body.admin_local_password).trim();
     }
 
     await db.updateSystemSettings(updates, req.apexUser.id);
@@ -166,8 +173,147 @@ router.post('/api/settings/ciam-sso/test', async (req, res) => {
 });
 
 // ============================================================================
-// GROUP B: OAuth2/OIDC + PKCE (S256) + Break-Glass + Inactive Guard (SSO-04)
+// GROUP B: OAuth2/OIDC + PKCE (S256) + Local/Admin Login + Break-Glass + Inactive Guard (SSO-04)
 // ============================================================================
+
+router.get('/api/auth/session', async (req, res) => {
+  try {
+    const s = await db.getSystemSettings();
+    const users = await db.getCollection('users');
+    const requireLogin = s.require_login !== 'false';
+    const isAuthenticated = requireLogin ? Boolean(req.apexAuthenticated) : true;
+
+    res.json({
+      authenticated: isAuthenticated,
+      require_login: requireLogin,
+      ciam_enabled: s.ciam_enabled === 'true',
+      break_glass_enabled: s.break_glass_enabled === 'true',
+      ciam_issuer_url: s.ciam_issuer_url || 'https://ciam.windowasia.com',
+      app_domain: s.app_domain || 'https://apex.windowasia.com',
+      database_mode: db.isUsingPostgres() ? 'postgresql' : 'local-fallback',
+      user: isAuthenticated ? req.apexUser : null,
+      accounts: users.map(u => ({
+        id: u.id,
+        uid: u.uid || u.id,
+        name: u.name,
+        email: u.email || `${String(u.id).toLowerCase()}@windowasia.co.th`,
+        role: u.role,
+        title: u.title || '',
+        kind: u.kind || 'internal',
+        active: u.active !== false
+      }))
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'session_check_error', message: err.message });
+  }
+});
+
+router.post('/api/auth/login', async (req, res) => {
+  try {
+    const { identifier, password } = req.body || {};
+    const s = await db.getSystemSettings();
+    const users = await db.getCollection('users');
+    const cleanId = String(identifier || '').trim().toLowerCase();
+
+    if (!cleanId) {
+      return res.status(400).json({ error: 'missing_credentials', message: 'กรุณาระบุอีเมลหรือรหัสผู้ใช้งาน' });
+    }
+
+    let userRecord = users.find(
+      u =>
+        String(u.id || '').toLowerCase() === cleanId ||
+        String(u.uid || '').toLowerCase() === cleanId ||
+        String(u.email || '').toLowerCase() === cleanId ||
+        String(u.name || '').toLowerCase() === cleanId
+    );
+
+    if (!userRecord && (cleanId === 'admin' || cleanId === 'u01@windowasia.co.th')) {
+      userRecord = users.find(u => u.id === 'U01') || users[0];
+    }
+
+    if (!userRecord) {
+      await db.insertAuditLog({
+        eventCode: 'SSO-02',
+        actorEmail: cleanId,
+        ipAddress: getClientIp(req),
+        targetResource: '/api/auth/login',
+        details: { reason: 'user_not_found', identifier: cleanId }
+      });
+      return res.status(401).json({ error: 'invalid_credentials', message: 'ไม่พบบัญชีผู้ใช้งานนี้ในระบบ APEX' });
+    }
+
+    // MANDATORY RULE: Inactive Account Guard (SSO-04)
+    if (userRecord.active === false) {
+      await db.insertAuditLog({
+        eventCode: 'SSO-04',
+        actorId: userRecord.id,
+        actorEmail: userRecord.email || cleanId,
+        actorRole: userRecord.role,
+        ipAddress: getClientIp(req),
+        targetResource: '/api/auth/login',
+        details: { reason: 'inactive_account_blocked', status_origin: userRecord.status_origin || 'LOCAL' }
+      });
+      return res.status(403).json({
+        error: 'account_inactive',
+        code: 'SSO-04',
+        message: 'บัญชีผู้ใช้งานของคุณถูกระงับการใช้งาน (SSO-04) กรุณาติดต่อผู้ดูแลระบบ'
+      });
+    }
+
+    const expectedPass = userRecord.password || s.admin_local_password || 'Apex@2026';
+    if (!password || String(password) !== String(expectedPass)) {
+      await db.insertAuditLog({
+        eventCode: 'SSO-02',
+        actorId: userRecord.id,
+        actorEmail: userRecord.email || cleanId,
+        actorRole: userRecord.role,
+        ipAddress: getClientIp(req),
+        targetResource: '/api/auth/login',
+        details: { reason: 'invalid_password' }
+      });
+      return res.status(401).json({
+        error: 'invalid_credentials',
+        message: 'รหัสผ่านไม่ถูกต้อง (รหัสผ่านเริ่มต้นสำหรับตั้งค่าครั้งแรกคือ Apex@2026)'
+      });
+    }
+
+    const sessionId = crypto.randomBytes(32).toString('hex');
+    ssoSessions.set(sessionId, {
+      userId: userRecord.id,
+      uid: userRecord.uid || userRecord.id,
+      email: userRecord.email || `${String(userRecord.id).toLowerCase()}@windowasia.co.th`,
+      authenticatedAt: new Date().toISOString()
+    });
+
+    await db.insertAuditLog({
+      eventCode: 'SSO-01',
+      actorId: userRecord.id,
+      actorEmail: userRecord.email || cleanId,
+      actorRole: userRecord.role,
+      ipAddress: getClientIp(req),
+      targetResource: '/api/auth/login',
+      details: { auth_method: 'local_credentials', app_code: 'apex' }
+    });
+
+    res.setHeader(
+      'Set-Cookie',
+      `apex_session=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800`
+    );
+    res.json({
+      status: 'ok',
+      message: `เข้าสู่ระบบสำเร็จในชื่อ ${userRecord.name}`,
+      user: {
+        id: userRecord.id,
+        uid: userRecord.uid || userRecord.id,
+        name: userRecord.name,
+        email: userRecord.email,
+        role: userRecord.role
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'login_error', message: err.message });
+  }
+});
 
 // RFC 9700 Seamless Bounce Entry Point
 router.get('/auth/start', async (req, res) => {
