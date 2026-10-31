@@ -65,7 +65,7 @@ router.get('/api/settings/ciam-sso', async (req, res) => {
       ai_api_key_masked: maskSecret(s.ai_api_key),
       has_ai_api_key: Boolean(s.ai_api_key),
       require_login: s.require_login !== 'false',
-      admin_local_password_masked: maskSecret(s.admin_local_password || 'Apex@2026'),
+      has_admin_password: Boolean(s.admin_password_hash),
       last_directory_sync_at: s.last_directory_sync_at || null,
       database_mode: db.isUsingPostgres() ? 'postgresql' : 'local-fallback'
     });
@@ -111,7 +111,7 @@ router.post('/api/settings/ciam-sso', async (req, res) => {
       updates.ai_api_key = String(body.ai_api_key).trim();
     }
     if (body.admin_local_password && !body.admin_local_password.includes('••••')) {
-      updates.admin_local_password = String(body.admin_local_password).trim();
+      updates.admin_password_hash = db.hashPassword(String(body.admin_local_password).trim());
     }
 
     await db.updateSystemSettings(updates, req.apexUser.id);
@@ -179,29 +179,17 @@ router.post('/api/settings/ciam-sso/test', async (req, res) => {
 router.get('/api/auth/session', async (req, res) => {
   try {
     const s = await db.getSystemSettings();
-    const users = await db.getCollection('users');
-    const requireLogin = s.require_login !== 'false';
-    const isAuthenticated = requireLogin ? Boolean(req.apexAuthenticated) : true;
+    const isAuthenticated = Boolean(req.apexAuthenticated && req.apexUser);
 
     res.json({
       authenticated: isAuthenticated,
-      require_login: requireLogin,
+      require_login: true,
       ciam_enabled: s.ciam_enabled === 'true',
       break_glass_enabled: s.break_glass_enabled === 'true',
       ciam_issuer_url: s.ciam_issuer_url || 'https://ciam.windowasia.com',
       app_domain: s.app_domain || 'https://apex.windowasia.com',
       database_mode: db.isUsingPostgres() ? 'postgresql' : 'local-fallback',
-      user: isAuthenticated ? req.apexUser : null,
-      accounts: users.map(u => ({
-        id: u.id,
-        uid: u.uid || u.id,
-        name: u.name,
-        email: u.email || `${String(u.id).toLowerCase()}@windowasia.co.th`,
-        role: u.role,
-        title: u.title || '',
-        kind: u.kind || 'internal',
-        active: u.active !== false
-      }))
+      user: isAuthenticated ? req.apexUser : null
     });
   } catch (err) {
     res.status(500).json({ error: 'session_check_error', message: err.message });
@@ -215,20 +203,22 @@ router.post('/api/auth/login', async (req, res) => {
     const users = await db.getCollection('users');
     const cleanId = String(identifier || '').trim().toLowerCase();
 
-    if (!cleanId) {
-      return res.status(400).json({ error: 'missing_credentials', message: 'กรุณาระบุอีเมลหรือรหัสผู้ใช้งาน' });
+    if (!cleanId || !password) {
+      return res.status(400).json({
+        error: 'missing_credentials',
+        message: 'กรุณาระบุรหัสผู้ใช้งานและรหัสผ่านให้ครบถ้วน'
+      });
     }
 
     let userRecord = users.find(
       u =>
         String(u.id || '').toLowerCase() === cleanId ||
         String(u.uid || '').toLowerCase() === cleanId ||
-        String(u.email || '').toLowerCase() === cleanId ||
-        String(u.name || '').toLowerCase() === cleanId
+        String(u.email || '').toLowerCase() === cleanId
     );
 
     if (!userRecord && (cleanId === 'admin' || cleanId === 'u01@windowasia.co.th')) {
-      userRecord = users.find(u => u.id === 'U01') || users[0];
+      userRecord = users.find(u => u.id === 'U01') || null;
     }
 
     if (!userRecord) {
@@ -239,7 +229,10 @@ router.post('/api/auth/login', async (req, res) => {
         targetResource: '/api/auth/login',
         details: { reason: 'user_not_found', identifier: cleanId }
       });
-      return res.status(401).json({ error: 'invalid_credentials', message: 'ไม่พบบัญชีผู้ใช้งานนี้ในระบบ APEX' });
+      return res.status(401).json({
+        error: 'invalid_credentials',
+        message: 'รหัสผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง'
+      });
     }
 
     // MANDATORY RULE: Inactive Account Guard (SSO-04)
@@ -260,8 +253,15 @@ router.post('/api/auth/login', async (req, res) => {
       });
     }
 
-    const expectedPass = userRecord.password || s.admin_local_password || 'Apex@2026';
-    if (!password || String(password) !== String(expectedPass)) {
+    // Verify per-user password_hash (or primary admin U01's admin_password_hash ONLY — no shared fallback across users)
+    let passwordValid = false;
+    if (userRecord.password_hash) {
+      passwordValid = db.verifyPassword(String(password), userRecord.password_hash);
+    } else if (userRecord.id === 'U01' && s.admin_password_hash) {
+      passwordValid = db.verifyPassword(String(password), s.admin_password_hash);
+    }
+
+    if (!passwordValid) {
       await db.insertAuditLog({
         eventCode: 'SSO-02',
         actorId: userRecord.id,
@@ -273,7 +273,7 @@ router.post('/api/auth/login', async (req, res) => {
       });
       return res.status(401).json({
         error: 'invalid_credentials',
-        message: 'รหัสผ่านไม่ถูกต้อง (รหัสผ่านเริ่มต้นสำหรับตั้งค่าครั้งแรกคือ Apex@2026)'
+        message: 'รหัสผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง'
       });
     }
 

@@ -46,6 +46,16 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Setup Node.js 20 & Run Security/Auth/Deploy Verification Suite
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run Pre-Merge Security & Logic Assertions
+        run: |
+          npm --prefix app ci
+          node scripts/verify-local.js
+
       - name: Test Build
         run: |
           docker build -t test-build:latest ./app

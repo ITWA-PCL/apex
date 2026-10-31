@@ -114,10 +114,10 @@ function computeEffectivePermissions(userRecord, customRoles = []) {
 }
 
 /**
- * Resolves the current user from:
- * 1. Central IAM SSO Session Cookie (`apex_session`)
- * 2. IT Security Gateway Headers (`X-User-ID`, `X-User-Email`, `X-User-Role`, `X-User-Department`)
- * 3. Fallback default admin (`U01`) in local development
+ * Resolves the current user ONLY from a verified session or explicitly trusted auth-proxy:
+ * 1. Central IAM / Local Auth Session Cookie (`apex_session`)
+ * 2. Trusted IT Security Gateway Headers (`X-User-ID`, `X-User-Email`) ONLY when `TRUST_PROXY_AUTH_HEADERS === 'true'`
+ * Unauthenticated requests NEVER receive a default user or permissions (`req.apexUser = null`).
  */
 async function resolveRequestUser(req, res, next) {
   try {
@@ -125,18 +125,16 @@ async function resolveRequestUser(req, res, next) {
     const sessionToken = cookies.apex_session;
     const sessionData = sessionToken ? ssoSessions.get(sessionToken) : null;
 
-    const gatewayUserId = req.headers['x-user-id'] || '';
-    const gatewayEmail = req.headers['x-user-email'] || '';
-    const gatewayRole = req.headers['x-user-role'] || '';
-    const gatewayDept = req.headers['x-user-department'] || '';
+    const trustGateway = process.env.TRUST_PROXY_AUTH_HEADERS === 'true';
+    const gatewayUserId = trustGateway ? req.headers['x-user-id'] || '' : '';
+    const gatewayEmail = trustGateway ? req.headers['x-user-email'] || '' : '';
+    const gatewayDept = trustGateway ? req.headers['x-user-department'] || '' : '';
 
     const users = await db.getCollection('users');
     const roles = await db.getCollection('roles');
 
     let matchedUser = null;
-    let isAuthenticated = false;
     if (sessionData) {
-      isAuthenticated = true;
       matchedUser = users.find(
         u =>
           u.id === sessionData.userId ||
@@ -144,26 +142,27 @@ async function resolveRequestUser(req, res, next) {
           (u.email && u.email.toLowerCase() === (sessionData.email || '').toLowerCase())
       );
     } else if (gatewayUserId || gatewayEmail) {
-      isAuthenticated = true;
       matchedUser = users.find(
         u =>
           u.uid === gatewayUserId ||
           u.id === gatewayUserId ||
           (gatewayEmail && u.email && u.email.toLowerCase() === gatewayEmail.toLowerCase())
       );
-      if (!matchedUser && users.length > 0) {
-        // Map starter-kit default header EMP-1001 to primary admin U01 so local dev works out of the box
-        matchedUser = users.find(u => u.id === 'U01') || users[0];
-      }
-    } else if (users.length > 0) {
-      matchedUser = users.find(u => u.id === 'U01') || users[0];
     }
 
-    // Support "Act As" role testing header from frontend when real user is admin
+    // Inactive Account Guard (SSO-04): If no matching user or user is disabled, invalidate session
+    if (!matchedUser || matchedUser.active === false) {
+      if (sessionToken) ssoSessions.delete(sessionToken);
+      req.apexAuthenticated = false;
+      req.apexUser = null;
+      return next();
+    }
+
+    // Support "Act As" role testing header from frontend ONLY when real authenticated user is admin
     const actAsId = req.headers['x-act-as-user'] || '';
     let effectiveUser = matchedUser;
-    if (actAsId && (!matchedUser || matchedUser.role === 'admin')) {
-      const target = users.find(u => u.id === actAsId);
+    if (actAsId && matchedUser.role === 'admin') {
+      const target = users.find(u => u.id === actAsId && u.active !== false);
       if (target) effectiveUser = target;
     }
 
@@ -171,32 +170,58 @@ async function resolveRequestUser(req, res, next) {
     const canWrite = perms.some(k => !k.startsWith('view.') && k !== 'fin');
     const canFin = perms.includes('fin');
 
-    req.apexAuthenticated = isAuthenticated;
+    req.apexAuthenticated = true;
     req.apexUser = {
-      id: effectiveUser?.id || gatewayUserId || 'U01',
-      uid: effectiveUser?.uid || effectiveUser?.id || gatewayUserId || 'U01',
-      name: effectiveUser?.name || 'ผู้ดูแลระบบ (IT Gateway)',
-      email: effectiveUser?.email || gatewayEmail || 'u01@windowasia.co.th',
-      role: effectiveUser?.role || 'admin',
-      department: gatewayDept || effectiveUser?.title || 'Operations',
-      active: effectiveUser ? effectiveUser.active !== false : true,
+      id: effectiveUser.id,
+      uid: effectiveUser.uid || effectiveUser.id,
+      name: effectiveUser.name || 'ผู้ดูแลระบบ',
+      email: effectiveUser.email || gatewayEmail || '',
+      role: effectiveUser.role || 'viewer',
+      department: gatewayDept || effectiveUser.title || 'Operations',
+      active: true,
       kind:
-        effectiveUser?.kind ||
-        (['contractor', 'customer'].includes(effectiveUser?.role) ? 'external' : 'internal'),
-      use_ad_auth: effectiveUser?.use_ad_auth ?? !['contractor', 'customer'].includes(effectiveUser?.role),
-      projects: effectiveUser?.projects || 'all',
-      team: effectiveUser?.team || '',
+        effectiveUser.kind ||
+        (['contractor', 'customer'].includes(effectiveUser.role) ? 'external' : 'internal'),
+      use_ad_auth: effectiveUser.use_ad_auth ?? !['contractor', 'customer'].includes(effectiveUser.role),
+      projects: effectiveUser.projects || 'all',
+      team: effectiveUser.team || '',
       permissions: perms,
       canWrite,
       canFin,
-      authenticated: isAuthenticated,
-      realUserId: matchedUser?.id || 'U01'
+      authenticated: true,
+      realUserId: matchedUser.id
     };
 
     next();
   } catch (err) {
     next(err);
   }
+}
+
+const PUBLIC_API_PATHS = new Set([
+  '/api/health',
+  '/api/auth/session',
+  '/api/auth/login',
+  '/api/auth/sso/login',
+  '/api/auth/sso/callback',
+  '/api/auth/sso/logout'
+]);
+
+function enforceApiAuthentication(req, res, next) {
+  const reqPath = req.path || '';
+  if (!reqPath.startsWith('/api/')) {
+    return next();
+  }
+  if (PUBLIC_API_PATHS.has(reqPath) || reqPath.startsWith('/api/v1/directory/accounts')) {
+    return next();
+  }
+  if (!req.apexAuthenticated || !req.apexUser) {
+    return res.status(401).json({
+      error: 'unauthenticated',
+      message: 'กรุณาเข้าสู่ระบบก่อนใช้งาน (Authentication Required)'
+    });
+  }
+  next();
 }
 
 module.exports = {
@@ -206,5 +231,6 @@ module.exports = {
   ssoSessions,
   parseCookies,
   computeEffectivePermissions,
-  resolveRequestUser
+  resolveRequestUser,
+  enforceApiAuthentication
 };

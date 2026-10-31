@@ -4,8 +4,32 @@
  * and ISO/IEC 27001:2022 Audit Logging (`transaction_logs` table).
  */
 const { Pool } = require('pg');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+
+function hashPassword(plainText) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const iterations = 100000;
+  const derived = crypto.pbkdf2Sync(String(plainText), salt, iterations, 32, 'sha256').toString('hex');
+  return `pbkdf2_sha256$${iterations}$${salt}$${derived}`;
+}
+
+function verifyPassword(plainText, storedHash) {
+  if (!plainText || !storedHash || typeof storedHash !== 'string') return false;
+  const parts = storedHash.split('$');
+  if (parts.length !== 4 || parts[0] !== 'pbkdf2_sha256') return false;
+  const iterations = parseInt(parts[1], 10);
+  const salt = parts[2];
+  const expectedHex = parts[3];
+  if (!iterations || !salt || !expectedHex) return false;
+  const actualBuf = crypto.pbkdf2Sync(String(plainText), salt, iterations, 32, 'sha256');
+  const expectedBuf = Buffer.from(expectedHex, 'hex');
+  if (actualBuf.length !== expectedBuf.length) return false;
+  return crypto.timingSafeEqual(actualBuf, expectedBuf);
+}
+
+const INITIAL_ADMIN_HASH = hashPassword(process.env.APEX_INITIAL_ADMIN_PASSWORD || 'Apex@2026');
 
 const VALID_COLLECTIONS = new Set([
   'openings', 'ncrs', 'teams', 'projects', 'customers', 'sales',
@@ -31,7 +55,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   ai_provider_url: 'https://api.openai.com/v1/chat/completions',
   ai_api_key: '',
   ai_model_name: 'gpt-4o-mini',
-  admin_local_password: 'Apex@2026',
+  admin_password_hash: INITIAL_ADMIN_HASH,
   require_login: 'true',
   last_directory_sync_at: ''
 };
@@ -125,6 +149,28 @@ async function initDatabase() {
             [k, String(v)]
           );
         }
+        // Ensure bootstrap primary admin U01 exists so initial login works before full dataset seed
+        await client.query(
+          `INSERT INTO apex_documents (collection, doc_id, data, updated_by)
+           VALUES ('users', 'U01', $1::jsonb, 'system-init')
+           ON CONFLICT (collection, doc_id) DO NOTHING`,
+          [
+            JSON.stringify({
+              id: 'U01',
+              uid: 'U01',
+              name: 'คุณปฏินันท์',
+              title: 'ผู้ดูแลระบบ (IT Security)',
+              email: 'u01@windowasia.co.th',
+              role: 'admin',
+              kind: 'internal',
+              use_ad_auth: true,
+              active: true,
+              projects: 'all',
+              grant: [],
+              deny: []
+            })
+          ]
+        );
         usePostgres = true;
         console.log('[DB] Connected to PostgreSQL (dept-db) and verified schema.');
         return true;
@@ -139,6 +185,23 @@ async function initDatabase() {
 
   console.warn('[DB] Falling back to local persistent JSON store (app/data/local-store.json).');
   loadFallbackStore();
+  if (!memoryStore.collections.users || !memoryStore.collections.users.U01) {
+    if (!memoryStore.collections.users) memoryStore.collections.users = {};
+    memoryStore.collections.users.U01 = {
+      id: 'U01',
+      uid: 'U01',
+      name: 'คุณปฏินันท์',
+      title: 'ผู้ดูแลระบบ (IT Security)',
+      email: 'u01@windowasia.co.th',
+      role: 'admin',
+      kind: 'internal',
+      use_ad_auth: true,
+      active: true,
+      projects: 'all',
+      grant: [],
+      deny: []
+    };
+  }
   return false;
 }
 
@@ -360,6 +423,8 @@ function isUsingPostgres() {
 module.exports = {
   VALID_COLLECTIONS,
   DEFAULT_SYSTEM_SETTINGS,
+  hashPassword,
+  verifyPassword,
   initDatabase,
   isUsingPostgres,
   getCollection,
