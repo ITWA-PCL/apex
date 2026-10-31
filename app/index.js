@@ -39,6 +39,7 @@ app.get('/api/health', async (req, res) => {
   res.json({
     status: 'ok',
     service: 'apex',
+    version: '1.1.0',
     domain: settings.app_domain || 'https://apex.windowasia.com',
     database: db.isUsingPostgres() ? 'postgresql' : 'local-fallback',
     ciam_v2_9_0: true,
