@@ -2,9 +2,10 @@ name: Security & Governance Gatekeeper
 
 on:
   pull_request:
-    branches: [ "main" ]
-    paths:
-      - "app/**"
+    branches: [ "main", "develop" ]
+  push:
+    branches: [ "feat/**", "develop" ]
+  workflow_dispatch:
 
 jobs:
   secret-scan:
