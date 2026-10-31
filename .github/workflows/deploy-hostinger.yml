@@ -48,11 +48,14 @@ jobs:
           port: ${{ steps.prep.outputs.port }}
           script_stop: true
           script: |
+            set -euo pipefail
             if [ ! -d "/var/www/Apex/.git" ]; then
               mkdir -p /var/www
               git clone https://github.com/ITWA-PCL/apex.git /var/www/Apex
             fi
             cd /var/www/Apex
+            git fetch origin main
+            git checkout --detach "${{ steps.prep.outputs.sha }}"
             APEX_DEPLOY_COMMIT="${{ steps.prep.outputs.sha }}" bash scripts/deploy-vps.sh
 
       - name: 6. Notice when SSH Secrets are not configured yet

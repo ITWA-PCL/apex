@@ -29,7 +29,50 @@ function verifyPassword(plainText, storedHash) {
   return crypto.timingSafeEqual(actualBuf, expectedBuf);
 }
 
-const INITIAL_ADMIN_HASH = hashPassword(process.env.APEX_INITIAL_ADMIN_PASSWORD || 'Apex@2026');
+/**
+ * Safely migrates legacy plaintext `admin_local_password` to `admin_password_hash`
+ * without ever overwriting a previously configured admin password with a source default,
+ * and initializes `admin_password_hash` from `APEX_INITIAL_ADMIN_PASSWORD` only if none is set.
+ */
+function reconcileAdminPasswordSettings(settingsObj = {}, envInitialPassword = process.env.APEX_INITIAL_ADMIN_PASSWORD) {
+  const legacyPlain = typeof settingsObj.admin_local_password === 'string'
+    ? settingsObj.admin_local_password.trim()
+    : '';
+  const existingHash = typeof settingsObj.admin_password_hash === 'string'
+    ? settingsObj.admin_password_hash.trim()
+    : '';
+  const envPass = typeof envInitialPassword === 'string' ? envInitialPassword.trim() : '';
+
+  if (legacyPlain) {
+    return {
+      admin_password_hash: hashPassword(legacyPlain),
+      migratedFromLegacy: true,
+      removeLegacyKey: true
+    };
+  }
+
+  if (existingHash && existingHash.startsWith('pbkdf2_sha256$')) {
+    return {
+      admin_password_hash: existingHash,
+      migratedFromLegacy: false,
+      removeLegacyKey: Boolean('admin_local_password' in settingsObj)
+    };
+  }
+
+  if (envPass) {
+    return {
+      admin_password_hash: hashPassword(envPass),
+      migratedFromLegacy: false,
+      removeLegacyKey: Boolean('admin_local_password' in settingsObj)
+    };
+  }
+
+  return {
+    admin_password_hash: '',
+    migratedFromLegacy: false,
+    removeLegacyKey: Boolean('admin_local_password' in settingsObj)
+  };
+}
 
 const VALID_COLLECTIONS = new Set([
   'openings', 'ncrs', 'teams', 'projects', 'customers', 'sales',
@@ -55,7 +98,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   ai_provider_url: 'https://api.openai.com/v1/chat/completions',
   ai_api_key: '',
   ai_model_name: 'gpt-4o-mini',
-  admin_password_hash: INITIAL_ADMIN_HASH,
+  admin_password_hash: '',
   require_login: 'true',
   last_directory_sync_at: ''
 };
@@ -82,6 +125,9 @@ function loadFallbackStore() {
       memoryStore.system_settings = { ...DEFAULT_SYSTEM_SETTINGS, ...(raw.system_settings || {}) };
       memoryStore.transaction_logs = raw.transaction_logs || [];
     }
+    const reconciled = reconcileAdminPasswordSettings(memoryStore.system_settings);
+    memoryStore.system_settings.admin_password_hash = reconciled.admin_password_hash;
+    delete memoryStore.system_settings.admin_local_password;
   } catch (err) {
     console.warn('[DB] Could not load fallback store, starting fresh:', err.message);
   }
@@ -149,6 +195,30 @@ async function initDatabase() {
             [k, String(v)]
           );
         }
+
+        // Safely migrate legacy admin_local_password or bootstrap from APEX_INITIAL_ADMIN_PASSWORD
+        const pwRows = await client.query(
+          `SELECT setting_key, setting_value FROM system_settings
+           WHERE setting_key IN ('admin_local_password', 'admin_password_hash')`
+        );
+        const pwMap = {};
+        for (const r of pwRows.rows) pwMap[r.setting_key] = r.setting_value;
+        const reconciled = reconcileAdminPasswordSettings(pwMap);
+        if (reconciled.admin_password_hash) {
+          await client.query(
+            `INSERT INTO system_settings (setting_key, setting_value, updated_by, updated_at)
+             VALUES ('admin_password_hash', $1, 'system-migration', NOW())
+             ON CONFLICT (setting_key) DO UPDATE SET
+               setting_value = EXCLUDED.setting_value,
+               updated_by = 'system-migration',
+               updated_at = NOW()`,
+            [reconciled.admin_password_hash]
+          );
+        }
+        if (reconciled.removeLegacyKey) {
+          await client.query(`DELETE FROM system_settings WHERE setting_key = 'admin_local_password'`);
+        }
+
         // Ensure bootstrap primary admin U01 exists so initial login works before full dataset seed
         await client.query(
           `INSERT INTO apex_documents (collection, doc_id, data, updated_by)
@@ -425,6 +495,7 @@ module.exports = {
   DEFAULT_SYSTEM_SETTINGS,
   hashPassword,
   verifyPassword,
+  reconcileAdminPasswordSettings,
   initDatabase,
   isUsingPostgres,
   getCollection,

@@ -27,6 +27,7 @@ services:
       NODE_ENV: development
       PORT: 3000
       DATABASE_URL: "postgresql://dept_user:dept_password_local@dept-db:5432/dept_db"
+      APEX_INITIAL_ADMIN_PASSWORD: "${APEX_INITIAL_ADMIN_PASSWORD:-}"
     expose:
       - "3000"
     depends_on:

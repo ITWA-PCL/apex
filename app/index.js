@@ -33,6 +33,7 @@ app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 // 3. Resolve User Identity & Enforce API Authentication Gate (ISO/IEC 27001:2022 A.5.15)
 app.use(resolveRequestUser);
 app.use(enforceApiAuthentication);
+app.use('/api', enforceApiAuthentication);
 
 // 4. Health Check Endpoint (Used by Docker & Load Balancers — zero user info leakage)
 app.get('/api/health', async (req, res) => {

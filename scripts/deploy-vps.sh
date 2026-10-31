@@ -73,17 +73,17 @@ fi
 echo "[3/5] Building & updating ONLY APEX containers (project: apex)..."
 docker compose -p apex -f docker-compose.yml up -d --build
 
-echo "[4/5] Verifying APEX container health (strict check)..."
+echo "[4/5] Verifying APEX container health & PostgreSQL connection (strict check)..."
 HEALTH_OK=0
 for attempt in $(seq 1 15); do
     sleep 2
     HEALTH_JSON="$(docker exec apex-app wget -qO- http://127.0.0.1:3000/api/health 2>/dev/null || true)"
-    if echo "${HEALTH_JSON}" | grep -q '"status":"ok"'; then
+    if echo "${HEALTH_JSON}" | grep -q '"status":"ok"' && echo "${HEALTH_JSON}" | grep -q '"database":"postgresql"'; then
         HEALTH_OK=1
-        echo "  [OK] apex-app healthcheck passed on attempt ${attempt}/15: ${HEALTH_JSON}"
+        echo "  [OK] apex-app healthcheck & PostgreSQL verified on attempt ${attempt}/15: ${HEALTH_JSON}"
         break
     fi
-    echo "  [WAIT] Waiting for apex-app healthcheck (attempt ${attempt}/15)..."
+    echo "  [WAIT] Waiting for apex-app healthcheck + PostgreSQL (attempt ${attempt}/15)..."
 done
 
 docker ps --filter "name=apex-" --format "table {{.Names}}\t{{.Status}}\t{{.Networks}}"

@@ -207,12 +207,31 @@ const PUBLIC_API_PATHS = new Set([
   '/api/auth/sso/logout'
 ]);
 
+function normalizeApiPath(rawUrl = '') {
+  const clean = String(rawUrl || '')
+    .split('?')[0]
+    .trim()
+    .toLowerCase()
+    .replace(/\/+/g, '/');
+  if (clean.length > 1 && clean.endsWith('/')) {
+    return clean.slice(0, -1);
+  }
+  return clean || '/';
+}
+
 function enforceApiAuthentication(req, res, next) {
-  const reqPath = req.path || '';
-  if (!reqPath.startsWith('/api/')) {
+  const fullPath = normalizeApiPath(req.originalUrl || req.url || req.path || '');
+  const subPath = normalizeApiPath(req.path || '');
+  const candidate = fullPath.startsWith('/api') ? fullPath : subPath;
+
+  if (candidate !== '/api' && !candidate.startsWith('/api/')) {
     return next();
   }
-  if (PUBLIC_API_PATHS.has(reqPath) || reqPath.startsWith('/api/v1/directory/accounts')) {
+  if (
+    PUBLIC_API_PATHS.has(candidate) ||
+    candidate === '/api/v1/directory/accounts' ||
+    candidate.startsWith('/api/v1/directory/accounts/')
+  ) {
     return next();
   }
   if (!req.apexAuthenticated || !req.apexUser) {
@@ -232,5 +251,6 @@ module.exports = {
   parseCookies,
   computeEffectivePermissions,
   resolveRequestUser,
+  normalizeApiPath,
   enforceApiAuthentication
 };

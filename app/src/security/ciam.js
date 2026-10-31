@@ -360,32 +360,165 @@ router.get('/api/auth/sso/login', async (req, res) => {
 
 router.get('/api/auth/sso/callback', async (req, res) => {
   try {
-    const { code, state, email: mockEmail, sub: mockSub } = req.query;
+    const { code, state } = req.query;
     const pkce = state ? pkceStore.get(String(state)) : null;
     if (state) pkceStore.delete(String(state));
 
-    if (!code) {
+    const s = await db.getSystemSettings();
+    const ssoActive = s.ciam_enabled === 'true' || s.break_glass_enabled === 'true';
+    if (!ssoActive || !s.ciam_client_secret) {
       await db.insertAuditLog({
         eventCode: 'SSO-02',
         ipAddress: getClientIp(req),
         targetResource: '/api/auth/sso/callback',
-        details: { reason: 'missing_authorization_code', state: Boolean(pkce) }
+        details: { reason: 'sso_not_configured_or_disabled' }
       });
-      return res.status(400).json({ error: 'invalid_grant', message: 'ไม่พบรหัสยืนยันตัวตน (Authorization Code)' });
+      return res.status(403).json({
+        error: 'sso_not_configured',
+        message: 'ระบบ Central IAM SSO ยังไม่ได้เปิดใช้งานหรือยังไม่ได้ตั้งค่า Client Secret'
+      });
+    }
+
+    const pkceValid = Boolean(pkce && pkce.codeVerifier && Date.now() - pkce.createdAt <= 10 * 60 * 1000);
+    if (!code || !state || !pkceValid) {
+      await db.insertAuditLog({
+        eventCode: 'SSO-02',
+        ipAddress: getClientIp(req),
+        targetResource: '/api/auth/sso/callback',
+        details: {
+          reason: !code ? 'missing_authorization_code' : 'invalid_or_expired_pkce_state',
+          pkce_valid: pkceValid
+        }
+      });
+      return res.status(400).json({
+        error: 'invalid_grant',
+        message: 'ข้อมูลยืนยันตัวตน (Authorization Code หรือ PKCE State) ไม่ถูกต้องหรือหมดอายุ'
+      });
+    }
+
+    const baseIssuer =
+      s.break_glass_enabled === 'true'
+        ? (s.break_glass_url || 'http://172.18.0.1:3100').replace(/\/+$/, '')
+        : (s.ciam_issuer_url || 'https://ciam.windowasia.com').replace(/\/+$/, '');
+
+    // Exchange authorization code + PKCE code_verifier with Central IAM token endpoint
+    const tokenParams = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: String(code),
+      redirect_uri: s.ciam_redirect_uri || 'https://apex.windowasia.com/api/auth/sso/callback',
+      client_id: s.ciam_client_id || 'apex-spoke-client',
+      client_secret: s.ciam_client_secret,
+      code_verifier: pkce.codeVerifier
+    });
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6000);
+    let verifiedEmail = '';
+    let verifiedSub = '';
+    try {
+      const tokenResp = await fetch(`${baseIssuer}/oauth2/token`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json'
+        },
+        body: tokenParams.toString(),
+        signal: controller.signal
+      });
+      if (!tokenResp.ok) {
+        clearTimeout(timer);
+        await db.insertAuditLog({
+          eventCode: 'SSO-02',
+          ipAddress: getClientIp(req),
+          targetResource: '/api/auth/sso/callback',
+          details: { reason: 'token_exchange_failed', status: tokenResp.status }
+        });
+        return res.status(401).json({
+          error: 'token_exchange_failed',
+          message: 'ไม่สามารถแลกเปลี่ยน Authorization Code กับเซิร์ฟเวอร์ Central IAM ได้'
+        });
+      }
+      const tokenData = await tokenResp.json();
+      if (!tokenData.access_token) {
+        clearTimeout(timer);
+        return res.status(401).json({
+          error: 'missing_access_token',
+          message: 'ไม่ได้รับ Access Token จากเซิร์ฟเวอร์ Central IAM'
+        });
+      }
+
+      const userInfoResp = await fetch(`${baseIssuer}/oauth2/userinfo`, {
+        headers: {
+          Authorization: `Bearer ${tokenData.access_token}`,
+          Accept: 'application/json'
+        },
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      if (!userInfoResp.ok) {
+        await db.insertAuditLog({
+          eventCode: 'SSO-02',
+          ipAddress: getClientIp(req),
+          targetResource: '/api/auth/sso/callback',
+          details: { reason: 'userinfo_fetch_failed', status: userInfoResp.status }
+        });
+        return res.status(401).json({
+          error: 'userinfo_failed',
+          message: 'ไม่สามารถตรวจสอบข้อมูลผู้ใช้จาก Central IAM ได้'
+        });
+      }
+      const profile = await userInfoResp.json();
+      verifiedEmail = String(profile.email || '').trim().toLowerCase();
+      verifiedSub = String(profile.sub || '').trim();
+    } catch (netErr) {
+      clearTimeout(timer);
+      await db.insertAuditLog({
+        eventCode: 'SSO-02',
+        ipAddress: getClientIp(req),
+        targetResource: '/api/auth/sso/callback',
+        details: { reason: 'ciam_network_error', error: netErr.message }
+      });
+      return res.status(502).json({
+        error: 'ciam_unreachable',
+        message: 'ไม่สามารถติดต่อเซิร์ฟเวอร์ Central IAM เพื่อตรวจสอบ Token ได้'
+      });
+    }
+
+    if (!verifiedEmail && !verifiedSub) {
+      return res.status(401).json({
+        error: 'unverified_identity',
+        message: 'ไม่พบข้อมูลอีเมลหรือรหัสประจำตัวจาก Central IAM'
+      });
     }
 
     const users = await db.getCollection('users');
-    const targetEmail = String(mockEmail || 'u01@windowasia.co.th').toLowerCase();
     const userRecord = users.find(
-      u => (u.email && u.email.toLowerCase() === targetEmail) || u.uid === mockSub
+      u =>
+        (verifiedEmail && u.email && u.email.toLowerCase() === verifiedEmail) ||
+        (verifiedSub && (u.uid === verifiedSub || u.id === verifiedSub))
     );
 
+    // Zero fallback to U01: account must exist in APEX directory
+    if (!userRecord) {
+      await db.insertAuditLog({
+        eventCode: 'SSO-02',
+        actorEmail: verifiedEmail,
+        ipAddress: getClientIp(req),
+        targetResource: '/api/auth/sso/callback',
+        details: { reason: 'account_not_provisioned', sub: verifiedSub }
+      });
+      return res.status(403).json({
+        error: 'account_not_provisioned',
+        message: 'บัญชีผู้ใช้งานนี้ยังไม่ได้รับสิทธิ์เข้าใช้งานในระบบ APEX'
+      });
+    }
+
     // MANDATORY RULE: Inactive Account Guard (SSO-04) - NEVER auto-enable disabled local accounts
-    if (userRecord && userRecord.active === false) {
+    if (userRecord.active === false) {
       await db.insertAuditLog({
         eventCode: 'SSO-04',
         actorId: userRecord.id,
-        actorEmail: userRecord.email || targetEmail,
+        actorEmail: userRecord.email || verifiedEmail,
         actorRole: userRecord.role,
         ipAddress: getClientIp(req),
         targetResource: '/api/auth/sso/callback',
@@ -403,27 +536,27 @@ router.get('/api/auth/sso/callback', async (req, res) => {
 
     const sessionId = crypto.randomBytes(32).toString('hex');
     ssoSessions.set(sessionId, {
-      userId: userRecord?.id || 'U01',
-      uid: userRecord?.uid || mockSub || 'EMP-1001',
-      email: userRecord?.email || targetEmail,
+      userId: userRecord.id,
+      uid: userRecord.uid || verifiedSub || userRecord.id,
+      email: userRecord.email || verifiedEmail,
       authenticatedAt: new Date().toISOString()
     });
 
     await db.insertAuditLog({
       eventCode: 'SSO-01',
-      actorId: userRecord?.id || 'U01',
-      actorEmail: userRecord?.email || targetEmail,
-      actorRole: userRecord?.role || 'admin',
+      actorId: userRecord.id,
+      actorEmail: userRecord.email || verifiedEmail,
+      actorRole: userRecord.role,
       ipAddress: getClientIp(req),
       targetResource: '/api/auth/sso/callback',
-      details: { pkce_verified: Boolean(pkce), app_code: 'apex' }
+      details: { pkce_verified: true, app_code: 'apex' }
     });
 
     res.setHeader(
       'Set-Cookie',
       `apex_session=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800`
     );
-    res.redirect(pkce?.returnTo || '/');
+    res.redirect(pkce.returnTo || '/');
   } catch (err) {
     res.status(500).json({ error: 'callback_error', message: err.message });
   }

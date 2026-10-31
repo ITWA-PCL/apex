@@ -3,10 +3,12 @@
  * Verifies:
  * 1. JavaScript syntax across all Track A (Security), Track B (Workflow/UI) & Script files
  * 2. Track A RBAC Engine (10 Roles x 37 Permissions + EXT_DENY 17 permissions hard-deny)
- * 3. Track A Authentication Gate (Unauthenticated requests receive zero permissions & 401 on protected APIs; PBKDF2-SHA256 hashing)
- * 4. Track A DLP Privacy Scrubber & Zero-Training AI Copilot headers
- * 5. Track B 8-Step Subcontractor Claim Waterfall & Delivery VAT Exemption
- * 6. CI/CD & Deploy Script Hardening (No execSync shell injection in open-pr.js; strict commit lock & healthcheck exit 1 in deploy-vps.sh)
+ * 3. Track A Authentication Gate (Case-insensitive /API/* protection, zero unauthenticated fallback, 401 enforcement)
+ * 4. Track A Password Migration & Zero Hardcoded Default Password (reconcileAdminPasswordSettings + PBKDF2-SHA256)
+ * 5. Track A SSO Callback Hardening (No mockEmail/mockSub bypass, rejects fake code without valid OIDC state/secret)
+ * 6. Track A DLP Privacy Scrubber & Zero-Training AI Copilot headers
+ * 7. Track B 8-Step Subcontractor Claim Waterfall & Delivery VAT Exemption
+ * 8. CI/CD & Deploy Script Hardening (execFileSync, pre-script git checkout of verified SHA, strict PostgreSQL healthcheck)
  */
 const { execFileSync } = require('child_process');
 const fs = require('fs');
@@ -59,45 +61,138 @@ async function runVerification() {
   assert.ok(extPerms.includes('s4'), 'Valid contractor permission s4 must remain');
   console.log(' [OK] Track A RBAC & EXT_DENY (17 hard-denied perms) verified');
 
-  // 3. Track A Unauthenticated Gate & PBKDF2 Password Security Verification
-  const db = require('../app/src/db/postgres');
-  assert.strictEqual(
-    db.DEFAULT_SYSTEM_SETTINGS.admin_local_password,
-    undefined,
-    'Plaintext admin_local_password must not exist in DEFAULT_SYSTEM_SETTINGS'
-  );
-  const sampleHash = db.hashPassword('TestSecret#2026');
-  assert.ok(sampleHash.startsWith('pbkdf2_sha256$'), 'Password hash must use PBKDF2-SHA256 format');
-  assert.strictEqual(db.verifyPassword('TestSecret#2026', sampleHash), true, 'Valid password must verify');
-  assert.strictEqual(db.verifyPassword('WrongPassword', sampleHash), false, 'Invalid password must fail');
-
-  const mockUnauthReq = { headers: {}, path: '/api/v1/bootstrap' };
+  // 3. Track A Case-Insensitive Authentication Gate Verification
+  const mockUnauthReq = { headers: {}, path: '/api/v1/bootstrap', originalUrl: '/api/v1/bootstrap' };
   let nextCalled = false;
   await rbac.resolveRequestUser(mockUnauthReq, {}, () => {
     nextCalled = true;
   });
   assert.strictEqual(nextCalled, true, 'resolveRequestUser must call next()');
   assert.strictEqual(mockUnauthReq.apexAuthenticated, false, 'Unauthenticated request must have apexAuthenticated=false');
-  assert.strictEqual(mockUnauthReq.apexUser, null, 'Unauthenticated request must NOT select a fallback user or permissions');
+  assert.strictEqual(mockUnauthReq.apexUser, null, 'Unauthenticated request must NOT select a fallback user');
 
-  let statusSet = 200;
-  let jsonBody = null;
-  const mockRes = {
-    status(code) {
-      statusSet = code;
-      return this;
+  const protectedCaseVariants = [
+    '/api/v1/bootstrap',
+    '/API/v1/bootstrap',
+    '/Api/V1/Seed',
+    '/aPi/settings/ciam-sso/',
+    '/API/V1/DB/users?limit=10'
+  ];
+  for (const variantUrl of protectedCaseVariants) {
+    let statusSet = 200;
+    let passedThrough = false;
+    const reqVariant = {
+      headers: {},
+      path: variantUrl.split('?')[0],
+      originalUrl: variantUrl,
+      apexAuthenticated: false,
+      apexUser: null
+    };
+    const resVariant = {
+      status(code) {
+        statusSet = code;
+        return this;
+      },
+      json() {
+        return this;
+      }
+    };
+    rbac.enforceApiAuthentication(reqVariant, resVariant, () => {
+      passedThrough = true;
+    });
+    assert.strictEqual(statusSet, 401, `Protected URL variant '${variantUrl}' must return 401 when unauthenticated`);
+    assert.strictEqual(passedThrough, false, `Protected URL variant '${variantUrl}' must NOT call next()`);
+  }
+  console.log(' [OK] Track A Case-Insensitive Auth Gate (/api/*, /API/*, /Api/* -> 401) verified');
+
+  // 4. Track A Password Migration & Zero Hardcoded Default Password Verification
+  const db = require('../app/src/db/postgres');
+  assert.strictEqual(
+    db.DEFAULT_SYSTEM_SETTINGS.admin_local_password,
+    undefined,
+    'Plaintext admin_local_password must not exist in DEFAULT_SYSTEM_SETTINGS'
+  );
+  assert.strictEqual(
+    db.DEFAULT_SYSTEM_SETTINGS.admin_password_hash,
+    '',
+    'DEFAULT_SYSTEM_SETTINGS.admin_password_hash must be empty (no hardcoded password hash in source)'
+  );
+
+  // Verify legacy admin_local_password migration takes priority over envInitialPassword
+  const migrated = db.reconcileAdminPasswordSettings(
+    { admin_local_password: 'LegacyCustomAdmin#99', admin_password_hash: '' },
+    'EnvDefaultPass#1'
+  );
+  assert.strictEqual(migrated.migratedFromLegacy, true, 'Must flag migratedFromLegacy=true');
+  assert.strictEqual(migrated.removeLegacyKey, true, 'Must flag removeLegacyKey=true');
+  assert.strictEqual(
+    db.verifyPassword('LegacyCustomAdmin#99', migrated.admin_password_hash),
+    true,
+    'Migrated hash must verify the legacy custom admin password'
+  );
+  assert.strictEqual(
+    db.verifyPassword('EnvDefaultPass#1', migrated.admin_password_hash),
+    false,
+    'Legacy custom admin password must NOT be overwritten by env default password'
+  );
+
+  // Verify existing PBKDF2 hash is preserved and not overwritten by envInitialPassword
+  const preserved = db.reconcileAdminPasswordSettings(
+    { admin_password_hash: migrated.admin_password_hash },
+    'NewEnvPass#2'
+  );
+  assert.strictEqual(
+    db.verifyPassword('LegacyCustomAdmin#99', preserved.admin_password_hash),
+    true,
+    'Existing PBKDF2 admin_password_hash must be preserved across restarts'
+  );
+
+  // Verify initial bootstrap from APEX_INITIAL_ADMIN_PASSWORD when no legacy or existing hash is set
+  const bootstrapped = db.reconcileAdminPasswordSettings({}, 'FreshBootstrapPass#2026');
+  assert.strictEqual(
+    db.verifyPassword('FreshBootstrapPass#2026', bootstrapped.admin_password_hash),
+    true,
+    'Fresh database must bootstrap admin_password_hash from APEX_INITIAL_ADMIN_PASSWORD'
+  );
+  console.log(' [OK] Track A Password Migration & PBKDF2-SHA256 Security verified');
+
+  // 5. Track A SSO Callback Hardening Verification (No Mock Bypass)
+  const ciamRouter = require('../app/src/security/ciam');
+  const ciamSrc = fs.readFileSync(path.join(rootDir, 'app/src/security/ciam.js'), 'utf8');
+  assert.ok(!ciamSrc.includes('mockEmail'), 'ciam.js must not accept mockEmail query parameter');
+  assert.ok(!ciamSrc.includes('mockSub'), 'ciam.js must not accept mockSub query parameter');
+
+  const callbackLayer = ciamRouter.stack.find(l => l.route && l.route.path === '/api/auth/sso/callback');
+  assert.ok(callbackLayer, 'SSO callback route must exist');
+  const callbackHandler = callbackLayer.route.stack[0].handle;
+
+  rbac.ssoSessions.clear();
+  let cbStatus = 200;
+  let cbBody = null;
+  await callbackHandler(
+    {
+      query: { code: 'fake_attacker_code', state: 'forged_state', email: 'u01@windowasia.co.th' },
+      headers: {},
+      socket: { remoteAddress: '127.0.0.1' }
     },
-    json(payload) {
-      jsonBody = payload;
-      return this;
+    {
+      status(code) {
+        cbStatus = code;
+        return this;
+      },
+      json(payload) {
+        cbBody = payload;
+        return this;
+      },
+      setHeader() {},
+      redirect() {}
     }
-  };
-  rbac.enforceApiAuthentication(mockUnauthReq, mockRes, () => {});
-  assert.strictEqual(statusSet, 401, 'Protected API must return 401 when unauthenticated');
-  assert.strictEqual(jsonBody?.error, 'unauthenticated', 'Protected API must return unauthenticated error code');
-  console.log(' [OK] Track A Authentication Gate (no unauthenticated fallback & 401 enforcement) verified');
+  );
+  assert.ok(cbStatus === 403 || cbStatus === 400, `Forged SSO callback must be rejected with 400/403 (got ${cbStatus})`);
+  assert.strictEqual(rbac.ssoSessions.size, 0, 'Forged SSO callback must NEVER create an active session');
+  console.log(' [OK] Track A SSO Callback Hardening (forged callback rejected, 0 sessions created) verified');
 
-  // 4. Track A AI Copilot DLP & Zero-Training Verification
+  // 6. Track A AI Copilot DLP & Zero-Training Verification
   const copilot = require('../app/src/security/copilot');
   const scrubbed = copilot.sanitizeContextForPrivacy(
     'Tax 0105556012345 Phone 081-234-5678 Email cfo@windowasia.com'
@@ -108,7 +203,7 @@ async function runVerification() {
   assert.strictEqual(copilot.ZERO_TRAINING_PRIVACY_HEADERS['X-Training-Opt-Out'], 'true');
   console.log(' [OK] Track A AI Copilot DLP & Zero-Training headers verified');
 
-  // 5. Track B Finance Engine Verification
+  // 7. Track B Finance Engine Verification
   const finance = require('../app/src/workflow/finance-engine');
   const wf = finance.calculateContractorClaimWaterfall({
     workValue: 100000,
@@ -134,15 +229,33 @@ async function runVerification() {
   assert.strictEqual(inv.total, 229000, 'Total invoice must be 229,000');
   console.log(' [OK] Track B 8-Step Claim Waterfall & Delivery VAT Exemption verified');
 
-  // 6. Deploy & PR Script Hardening Verification
+  // 8. Deploy & PR Script Hardening Verification
   const openPrSrc = fs.readFileSync(path.join(rootDir, 'scripts/open-pr.js'), 'utf8');
   assert.ok(!openPrSrc.includes('execSync('), 'scripts/open-pr.js must use execFileSync instead of execSync');
   assert.ok(openPrSrc.includes('verifyCleanAndRunLocalSuite()'), 'scripts/open-pr.js must actually execute verify-local.js');
 
   const deployVpsSrc = fs.readFileSync(path.join(rootDir, 'scripts/deploy-vps.sh'), 'utf8');
   assert.ok(deployVpsSrc.includes('APEX_DEPLOY_COMMIT'), 'scripts/deploy-vps.sh must support APEX_DEPLOY_COMMIT locking');
+  assert.ok(
+    deployVpsSrc.includes('"database":"postgresql"'),
+    'scripts/deploy-vps.sh healthcheck must enforce database=postgresql (reject local-fallback)'
+  );
   assert.ok(deployVpsSrc.includes('if [ "${HEALTH_OK}" -ne 1 ]; then'), 'scripts/deploy-vps.sh must abort with exit 1 on failed healthcheck');
-  console.log(' [OK] CI/CD & Deploy Script Hardening (execFileSync, commit lock & strict healthcheck) verified');
+
+  const workflowSrc = fs.readFileSync(path.join(rootDir, '.github/workflows/deploy-hostinger.yml'), 'utf8');
+  const checkoutIdx = workflowSrc.indexOf('git checkout --detach "${{ steps.prep.outputs.sha }}"');
+  const bashDeployIdx = workflowSrc.indexOf('bash scripts/deploy-vps.sh');
+  assert.ok(
+    checkoutIdx > 0 && checkoutIdx < bashDeployIdx,
+    'deploy-hostinger.yml must checkout the verified commit SHA BEFORE invoking bash scripts/deploy-vps.sh'
+  );
+
+  const composeSrc = fs.readFileSync(path.join(rootDir, 'docker-compose.yml'), 'utf8');
+  assert.ok(
+    composeSrc.includes('APEX_INITIAL_ADMIN_PASSWORD'),
+    'docker-compose.yml must pass APEX_INITIAL_ADMIN_PASSWORD into apex-app container'
+  );
+  console.log(' [OK] CI/CD & Deploy Script Hardening (pre-script SHA checkout & PostgreSQL healthcheck) verified');
 
   console.log('=================================================================');
   console.log(' ✅ ALL LOCAL COMPILE & SECURITY/FINANCE CHECKS PASSED (0 ERRORS)');
