@@ -41,6 +41,7 @@ services:
       PORT: 3000
       DATABASE_URL: "postgresql://apex:${POSTGRES_PASSWORD:-apex_password}@postgres:5432/apex"
       APP_MASTER_KEY: "${APP_MASTER_KEY:-apex_windowasia_iso27001_master_key_2026}"
+      APEX_INITIAL_ADMIN_PASSWORD: "${APEX_INITIAL_ADMIN_PASSWORD:-}"
     depends_on:
       postgres:
         condition: service_healthy

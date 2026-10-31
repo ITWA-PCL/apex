@@ -250,14 +250,6 @@
       return;
     }
 
-    const accounts = (sessionInfo?.accounts || []).filter(a => a.active !== false);
-    const accountOptions = accounts
-      .map(
-        a =>
-          `<option value="${a.id}" data-email="${a.email || ''}">${a.name} (${ROLE_TH[a.role] || a.role} · ${a.id})</option>`
-      )
-      .join('');
-
     overlay.hidden = false;
     overlay.innerHTML = `
       <div class="apex-login-card">
@@ -271,27 +263,16 @@
           🔐 เข้าสู่ระบบด้วย Window Asia Central IAM (SSO)
         </button>
 
-        <div class="apex-login-divider">หรือเข้าสู่ระบบด้วยรหัสผู้ใช้งาน / ผู้ดูแลระบบ</div>
+        <div class="apex-login-divider">หรือเข้าสู่ระบบสำหรับผู้ดูแลระบบ / บัญชี Non-AD</div>
 
         <form id="apexLocalLoginForm">
-          ${
-            accounts.length
-              ? `<label class="apex-login-field">
-                  <span>เลือกบัญชีผู้ใช้งาน (หรือพิมพ์อีเมลด้านล่าง)</span>
-                  <select id="apexQuickAccountSelect">
-                    <option value="">-- เลือกบัญชีผู้ใช้งาน --</option>
-                    ${accountOptions}
-                  </select>
-                </label>`
-              : ''
-          }
           <label class="apex-login-field">
             <span>อีเมล หรือ รหัสผู้ใช้งาน (User ID)</span>
-            <input type="text" name="identifier" id="apexLoginIdentifier" value="U01" placeholder="เช่น U01 หรือ u01@windowasia.co.th" required autocomplete="username">
+            <input type="text" name="identifier" id="apexLoginIdentifier" placeholder="กรอกอีเมลหรือรหัสผู้ใช้งาน" required autocomplete="username">
           </label>
           <label class="apex-login-field">
             <span>รหัสผ่าน (Password)</span>
-            <input type="password" name="password" id="apexLoginPassword" value="" placeholder="กรอกรหัสผ่าน (ค่าเริ่มต้นครั้งแรก: Apex@2026)" required autocomplete="current-password">
+            <input type="password" name="password" id="apexLoginPassword" value="" placeholder="กรอกรหัสผ่านของคุณ" required autocomplete="current-password">
           </label>
           <button type="submit" class="apex-login-submit" id="btnApexLoginSubmit">
             เข้าสู่ระบบ (Sign In) →
@@ -304,14 +285,6 @@
         </div>
       </div>
     `;
-
-    const selectEl = overlay.querySelector('#apexQuickAccountSelect');
-    const idInput = overlay.querySelector('#apexLoginIdentifier');
-    selectEl?.addEventListener('change', () => {
-      if (selectEl.value && idInput) {
-        idInput.value = selectEl.value;
-      }
-    });
 
     overlay.querySelector('#btnLoginCiamSso')?.addEventListener('click', () => {
       window.location.href = '/api/auth/sso/login';
@@ -586,8 +559,8 @@
               </div>
             </div>
             <div class="form-grid" style="margin-top:10px">
-              <label style="grid-column:1/-1">เปลี่ยนรหัสผ่านผู้ดูแลระบบ (Admin / Local Login Password)
-                <input type="password" name="admin_local_password" placeholder="เว้นว่างไว้หากไม่ต้องการเปลี่ยน (${s.admin_local_password_masked || 'ค่าเริ่มต้น: Apex@2026'})">
+              <label style="grid-column:1/-1">เปลี่ยนรหัสผ่านผู้ดูแลระบบหลัก (Primary Admin U01 Password — PBKDF2-SHA256)
+                <input type="password" name="admin_local_password" placeholder="เว้นว่างไว้หากไม่ต้องการเปลี่ยนรหัสผ่าน">
               </label>
               <label class="row" style="gap:8px;grid-column:1/-1">
                 <input type="checkbox" name="require_login" ${s.require_login !== false ? 'checked' : ''} style="width:18px;height:18px">

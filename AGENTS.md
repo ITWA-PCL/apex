@@ -21,10 +21,10 @@
 > **กฎตอนจบ Session และการส่งโค้ดขึ้น Git (Mandatory Pre-Push Local Compile & Session Close Protocol):**
 > 1. **ห้าม Push โค้ดที่ยังไม่ได้ Compile/Test บน Local เด็ดขาด:** หลังแก้ไขโค้ดทุกครั้ง ต้องรันตรวจสอบ Syntax, Dependency, และการ Build/Start บนเครื่อง Local (`node --check`, `npm test` / ทดสอบรันเซิร์ฟเวอร์ หรือ `docker build ./app`) จนมั่นใจว่า **ไม่มี Error 100%** ก่อนเสมอ
 > 2. **อัปเดตเอกสารส่งมอบงาน:** ต้องอัปเดตสถานะใน **`TASKS.md`** (และ **`TASK.md`**) พร้อมเขียนสรุปการส่งมอบงานลงใน **`HANDOFF.md`**
-> 3. **Push เข้า Branch ของตัวเอง:**
->    - **Track A (คุณ — Lead Security & Architect):** Push ขึ้น Branch ของคุณ (เช่น `feat/sec-*` หรือ `develop`)
->    - **Track B (CFO — Business Process Lead):** Push ขึ้น Branch ของ CFO (เช่น `feat/flow-*` หรือ `develop`)
->    - ห้าม Push โค้ดที่ยังไม่ผ่านการตรวจรับตรงเข้า `main` โดยไม่ผ่านการตรวจสอบ
+> 3. **Push เข้า Branch ของตัวเอง และสร้าง Pull Request อัตโนมัติ (`node scripts/open-pr.js`):**
+>    - **Track A (คุณ — Lead Security & Architect):** Push ขึ้น Branch ของคุณ (เช่น `feat/sec-ciam-core`) แล้วรัน `node scripts/open-pr.js`
+>    - **Track B (CFO — Business Process Lead):** Push ขึ้น Branch ของ CFO (`feat/flow-cfo`) แล้วรัน `node scripts/open-pr.js`
+>    - สคริปต์ `node scripts/open-pr.js` จะสร้างใบขออนุมัติ (Pull Request) ขึ้นไปรอในแท็บ `Pull requests` บน GitHub ให้ Admin กด Approve & Merge เข้า `main` โดยอัตโนมัติ (ห้าม Push ตรงเข้า `main`)
 
 ---
 

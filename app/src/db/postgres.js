@@ -4,8 +4,75 @@
  * and ISO/IEC 27001:2022 Audit Logging (`transaction_logs` table).
  */
 const { Pool } = require('pg');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+
+function hashPassword(plainText) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const iterations = 100000;
+  const derived = crypto.pbkdf2Sync(String(plainText), salt, iterations, 32, 'sha256').toString('hex');
+  return `pbkdf2_sha256$${iterations}$${salt}$${derived}`;
+}
+
+function verifyPassword(plainText, storedHash) {
+  if (!plainText || !storedHash || typeof storedHash !== 'string') return false;
+  const parts = storedHash.split('$');
+  if (parts.length !== 4 || parts[0] !== 'pbkdf2_sha256') return false;
+  const iterations = parseInt(parts[1], 10);
+  const salt = parts[2];
+  const expectedHex = parts[3];
+  if (!iterations || !salt || !expectedHex) return false;
+  const actualBuf = crypto.pbkdf2Sync(String(plainText), salt, iterations, 32, 'sha256');
+  const expectedBuf = Buffer.from(expectedHex, 'hex');
+  if (actualBuf.length !== expectedBuf.length) return false;
+  return crypto.timingSafeEqual(actualBuf, expectedBuf);
+}
+
+/**
+ * Safely migrates legacy plaintext `admin_local_password` to `admin_password_hash`
+ * without ever overwriting a previously configured admin password with a source default,
+ * and initializes `admin_password_hash` from `APEX_INITIAL_ADMIN_PASSWORD` only if none is set.
+ */
+function reconcileAdminPasswordSettings(settingsObj = {}, envInitialPassword = process.env.APEX_INITIAL_ADMIN_PASSWORD) {
+  const legacyPlain = typeof settingsObj.admin_local_password === 'string'
+    ? settingsObj.admin_local_password.trim()
+    : '';
+  const existingHash = typeof settingsObj.admin_password_hash === 'string'
+    ? settingsObj.admin_password_hash.trim()
+    : '';
+  const envPass = typeof envInitialPassword === 'string' ? envInitialPassword.trim() : '';
+
+  if (legacyPlain) {
+    return {
+      admin_password_hash: hashPassword(legacyPlain),
+      migratedFromLegacy: true,
+      removeLegacyKey: true
+    };
+  }
+
+  if (existingHash && existingHash.startsWith('pbkdf2_sha256$')) {
+    return {
+      admin_password_hash: existingHash,
+      migratedFromLegacy: false,
+      removeLegacyKey: Boolean('admin_local_password' in settingsObj)
+    };
+  }
+
+  if (envPass) {
+    return {
+      admin_password_hash: hashPassword(envPass),
+      migratedFromLegacy: false,
+      removeLegacyKey: Boolean('admin_local_password' in settingsObj)
+    };
+  }
+
+  return {
+    admin_password_hash: '',
+    migratedFromLegacy: false,
+    removeLegacyKey: Boolean('admin_local_password' in settingsObj)
+  };
+}
 
 const VALID_COLLECTIONS = new Set([
   'openings', 'ncrs', 'teams', 'projects', 'customers', 'sales',
@@ -31,7 +98,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   ai_provider_url: 'https://api.openai.com/v1/chat/completions',
   ai_api_key: '',
   ai_model_name: 'gpt-4o-mini',
-  admin_local_password: 'Apex@2026',
+  admin_password_hash: '',
   require_login: 'true',
   last_directory_sync_at: ''
 };
@@ -58,6 +125,9 @@ function loadFallbackStore() {
       memoryStore.system_settings = { ...DEFAULT_SYSTEM_SETTINGS, ...(raw.system_settings || {}) };
       memoryStore.transaction_logs = raw.transaction_logs || [];
     }
+    const reconciled = reconcileAdminPasswordSettings(memoryStore.system_settings);
+    memoryStore.system_settings.admin_password_hash = reconciled.admin_password_hash;
+    delete memoryStore.system_settings.admin_local_password;
   } catch (err) {
     console.warn('[DB] Could not load fallback store, starting fresh:', err.message);
   }
@@ -125,6 +195,52 @@ async function initDatabase() {
             [k, String(v)]
           );
         }
+
+        // Safely migrate legacy admin_local_password or bootstrap from APEX_INITIAL_ADMIN_PASSWORD
+        const pwRows = await client.query(
+          `SELECT setting_key, setting_value FROM system_settings
+           WHERE setting_key IN ('admin_local_password', 'admin_password_hash')`
+        );
+        const pwMap = {};
+        for (const r of pwRows.rows) pwMap[r.setting_key] = r.setting_value;
+        const reconciled = reconcileAdminPasswordSettings(pwMap);
+        if (reconciled.admin_password_hash) {
+          await client.query(
+            `INSERT INTO system_settings (setting_key, setting_value, updated_by, updated_at)
+             VALUES ('admin_password_hash', $1, 'system-migration', NOW())
+             ON CONFLICT (setting_key) DO UPDATE SET
+               setting_value = EXCLUDED.setting_value,
+               updated_by = 'system-migration',
+               updated_at = NOW()`,
+            [reconciled.admin_password_hash]
+          );
+        }
+        if (reconciled.removeLegacyKey) {
+          await client.query(`DELETE FROM system_settings WHERE setting_key = 'admin_local_password'`);
+        }
+
+        // Ensure bootstrap primary admin U01 exists so initial login works before full dataset seed
+        await client.query(
+          `INSERT INTO apex_documents (collection, doc_id, data, updated_by)
+           VALUES ('users', 'U01', $1::jsonb, 'system-init')
+           ON CONFLICT (collection, doc_id) DO NOTHING`,
+          [
+            JSON.stringify({
+              id: 'U01',
+              uid: 'U01',
+              name: 'คุณปฏินันท์',
+              title: 'ผู้ดูแลระบบ (IT Security)',
+              email: 'u01@windowasia.co.th',
+              role: 'admin',
+              kind: 'internal',
+              use_ad_auth: true,
+              active: true,
+              projects: 'all',
+              grant: [],
+              deny: []
+            })
+          ]
+        );
         usePostgres = true;
         console.log('[DB] Connected to PostgreSQL (dept-db) and verified schema.');
         return true;
@@ -139,6 +255,23 @@ async function initDatabase() {
 
   console.warn('[DB] Falling back to local persistent JSON store (app/data/local-store.json).');
   loadFallbackStore();
+  if (!memoryStore.collections.users || !memoryStore.collections.users.U01) {
+    if (!memoryStore.collections.users) memoryStore.collections.users = {};
+    memoryStore.collections.users.U01 = {
+      id: 'U01',
+      uid: 'U01',
+      name: 'คุณปฏินันท์',
+      title: 'ผู้ดูแลระบบ (IT Security)',
+      email: 'u01@windowasia.co.th',
+      role: 'admin',
+      kind: 'internal',
+      use_ad_auth: true,
+      active: true,
+      projects: 'all',
+      grant: [],
+      deny: []
+    };
+  }
   return false;
 }
 
@@ -360,6 +493,9 @@ function isUsingPostgres() {
 module.exports = {
   VALID_COLLECTIONS,
   DEFAULT_SYSTEM_SETTINGS,
+  hashPassword,
+  verifyPassword,
+  reconcileAdminPasswordSettings,
   initDatabase,
   isUsingPostgres,
   getCollection,

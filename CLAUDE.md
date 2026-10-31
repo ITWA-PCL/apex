@@ -107,10 +107,11 @@
 3. **อัปเดตเอกสารส่งมอบงานเสมอ:**
    - อัปเดตสถานะงานใน **`TASKS.md`** และ **`TASK.md`** ให้ตรงกัน
    - เขียนสรุปสิ่งที่ทำเสร็จในวันนี้ลงใน **`HANDOFF.md`** (ระบุวันที่ เวลา ผู้ส่งมอบ: CFO / Track B และก้าวต่อไป)
-4. **Commit และ Push ขึ้นกิ่งของ CFO (`feat/flow-cfo`):**
+4. **Commit, Push ขึ้นกิ่งของ CFO (`feat/flow-cfo`), และเปิดใบขออนุมัติ (Pull Request) อัตโนมัติ:**
    ```powershell
    git add app/src/workflow/ app/public/index.html HANDOFF.md TASKS.md TASK.md MEMORY.md PRD.md
    git commit -m "feat(flow): <สรุปสิ่งที่แก้ไขสั้นๆ>"
    git push -u origin feat/flow-cfo
+   node scripts/open-pr.js
    ```
-   *(ห้าม Push ตรงเข้ากิ่ง `main` เด็ดขาด เพราะกิ่ง `main` สงวนไว้สำหรับเปิด Pull Request ให้ทีม IT ตรวจอนุมัติขึ้น Production เท่านั้น)*
+   *(คำสั่ง `node scripts/open-pr.js` จะสร้างใบ Pull Request ส่งไปให้ Admin กด Approve บนหน้าเว็บ GitHub อัตโนมัติทันที ห้าม Push ตรงเข้ากิ่ง `main` เด็ดขาด)*

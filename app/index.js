@@ -14,7 +14,7 @@ const express = require('express');
 const path = require('path');
 const db = require('./src/db/postgres');
 const { securityHeadersMiddleware, createRateLimiter } = require('./src/security/headers');
-const { resolveRequestUser } = require('./src/security/rbac');
+const { resolveRequestUser, enforceApiAuthentication } = require('./src/security/rbac');
 const ciamRouter = require('./src/security/ciam');
 const { router: copilotRouter } = require('./src/security/copilot');
 const collectionsRouter = require('./src/workflow/collections-api');
@@ -30,22 +30,22 @@ app.use(createRateLimiter({ windowMs: 60000, maxRequests: 600 }));
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-// 3. Resolve User Identity & RBAC Permissions (Central IAM Session / IT Security Gateway X-User-*)
+// 3. Resolve User Identity & Enforce API Authentication Gate (ISO/IEC 27001:2022 A.5.15)
 app.use(resolveRequestUser);
+app.use(enforceApiAuthentication);
+app.use('/api', enforceApiAuthentication);
 
-// 4. Health Check Endpoint (Used by Docker & Load Balancers)
+// 4. Health Check Endpoint (Used by Docker & Load Balancers — zero user info leakage)
 app.get('/api/health', async (req, res) => {
   const settings = await db.getSystemSettings();
   res.json({
     status: 'ok',
     service: 'apex',
+    version: '1.1.0',
     domain: settings.app_domain || 'https://apex.windowasia.com',
     database: db.isUsingPostgres() ? 'postgresql' : 'local-fallback',
     ciam_v2_9_0: true,
-    user: {
-      id: req.apexUser?.id,
-      role: req.apexUser?.role
-    },
+    authenticated: Boolean(req.apexAuthenticated),
     timestamp: new Date().toISOString()
   });
 });

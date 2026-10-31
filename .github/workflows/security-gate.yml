@@ -2,9 +2,10 @@ name: Security & Governance Gatekeeper
 
 on:
   pull_request:
-    branches: [ "main" ]
-    paths:
-      - "app/**"
+    branches: [ "main", "develop" ]
+  push:
+    branches: [ "feat/**", "develop" ]
+  workflow_dispatch:
 
 jobs:
   secret-scan:
@@ -44,6 +45,16 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      - name: Setup Node.js 20 & Run Security/Auth/Deploy Verification Suite
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run Pre-Merge Security & Logic Assertions
+        run: |
+          npm --prefix app ci
+          node scripts/verify-local.js
 
       - name: Test Build
         run: |
