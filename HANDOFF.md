@@ -8,17 +8,17 @@
 
 ## Latest Handoff Status (จุดพักงานล่าสุด — พร้อมกลับมาทำต่อได้ทันที)
 
-- **วันที่ / เวลาบันทึกส่งมอบ:** `2026-10-30 21:12 (+07:00)`
+- **วันที่ / เวลาบันทึกส่งมอบ:** `2026-10-31 18:25 (+07:00)`
 - **ผู้ส่งมอบงานล่าสุด:** Lead Security & Core Architect (คุณ — Track A ร่วมกับ Antigravity AI)
 - **ชื่อโปรเจกต์หลัก:** **APEX** (`https://apex.windowasia.com` — ระบบควบคุมงานติดตั้งประตู-หน้าต่าง)
 - **โฟลเดอร์หลักของโปรเจกต์บนเครื่อง Local (ทั้งเครื่องคุณและเครื่อง CFO):** **`D:\Python\APEX`**
 - **โฟลเดอร์ Production บน Hostinger VPS:** **`/var/www/Apex`**
 - **Git Remote ของบริษัท:** `https://github.com/ITWA-PCL/apex.git`
-- **Git Branch ล่าสุด:**
-  - Branch ของคุณ (Track A): `feat/sec-ciam-core`
+- **Git Branch & Pull Request ล่าสุด:**
+  - Branch ของคุณ (Track A): `feat/sec-ciam-core` (เปิด **PR #1** `https://github.com/ITWA-PCL/apex/pull/1` รอ Merge เข้า `main` หลังผ่านการตรวจครบ 3 รอบ)
   - Branch ของ CFO (Track B): `feat/flow-cfo` (จะถูกสร้างอัตโนมัติเมื่อ CFO รันคำสั่ง Setup ใน Claude Code)
-  - Branch กลางของทีม: `develop` (และ `main` ซิงค์ตรงกันที่สถานะเสถียรล่าสุด)
-- **สถานะการทดสอบ (Local Compile & Verification):** **ผ่าน 100% (`0 Errors`)** ด้วยคำสั่ง `node scripts/verify-local.js`
+  - Branch กลางของทีม: `develop` / `main`
+- **สถานะการทดสอบ (Local Compile & Verification):** **ผ่าน 100% (`0 Errors`)** ด้วยคำสั่ง `node scripts/verify-local.js` (รวมชุดทดสอบ Security Gate, Case-Insensitive Auth Gate, PBKDF2 Password Migration, SSO Callback Hardening, และ Post-Login Collection/Project RBAC Scoping)
 
 ---
 

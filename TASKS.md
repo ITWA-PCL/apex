@@ -56,6 +56,6 @@
 ---
 
 ## Phase 4: Integration, Hardening & Production Deployment (`apex.windowasia.com`)
-- [ ] **T4.1** ทดสอบการทำงานร่วมกันระหว่าง RBAC/CIAM (Track A) และ Process Flow/Finance (Track B) ครบทั้ง 10 บทบาท
-- [ ] **T4.2** ตรวจสอบผลการสแกน GitHub Actions (`Security & Governance Gatekeeper`: Gitleaks, Trivy, Docker Build) บน Pull Request
-- [ ] **T4.3** Deploy ขึ้น Cloud Production ที่ `https://apex.windowasia.com` และเปิดใช้งาน Cron ล้าง Cache รายสัปดาห์
+- [x] **T4.1** ทดสอบการทำงานร่วมกันระหว่าง RBAC/CIAM (Track A) และ Process Flow/Finance (Track B) ครบทั้ง 10 บทบาท + ล็อกสิทธิ์ระดับ Collection/Project Scope และป้องกัน Privilege Escalation หลัง Login
+- [x] **T4.2** ตรวจสอบผลการสแกน GitHub Actions (`Security & Governance Gatekeeper`: Gitleaks, Trivy, Docker Build) บน Pull Request #1 ผ่านครบทั้ง 3 ด่าน
+- [/] **T4.3** Deploy ขึ้น Cloud Production ที่ `https://apex.windowasia.com` (`/var/www/Apex`) และเปิดใช้งาน Cron ล้าง Cache รายสัปดาห์

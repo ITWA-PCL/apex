@@ -243,14 +243,224 @@ function enforceApiAuthentication(req, res, next) {
   next();
 }
 
+// ============================================================================
+// Collection-Level Read/Write RBAC, Project/Team Scoping & Secret Scrubbing
+// ============================================================================
+
+const COLLECTION_ACCESS_RULES = {
+  users: {
+    read: ['users'],
+    write: ['users']
+  },
+  roles: {
+    read: ['users'],
+    write: ['users']
+  },
+  bids: {
+    read: ['view.bid', 'bid.edit', 'bid.win'],
+    write: ['bid.edit', 'bid.win']
+  },
+  sales: {
+    read: ['fin', 'cost.edit', 'view.poc', 'view.cash'],
+    write: ['cost.edit']
+  },
+  budgets: {
+    read: ['fin', 'cost.edit', 'view.poc', 'view.cash'],
+    write: ['cost.edit']
+  },
+  others: {
+    read: ['fin', 'cost.edit', 'view.poc', 'view.cash'],
+    write: ['cost.edit']
+  },
+  cinvoices: {
+    read: ['fin', 'bill', 'recv', 'view.cash', 'view.poc'],
+    write: ['bill', 'recv']
+  },
+  labor: {
+    read: ['fin', 'cost.edit', 'team.edit', 'view.team'],
+    write: ['cost.edit', 'team.edit']
+  },
+  teams: {
+    read: ['view.team', 'team.edit', 'claim.submit', 'claim.approve', 'claim.pay', 'proj.assign'],
+    write: ['team.edit']
+  },
+  engagements: {
+    read: ['view.team', 'team.edit', 'claim.submit', 'claim.approve', 'claim.pay', 'retcert', 'fin', 'view.poc'],
+    write: ['team.edit', 'retcert']
+  },
+  claims: {
+    read: ['view.team', 'claim.submit', 'claim.approve', 'claim.pay', 'fin', 'view.cash', 'view.poc'],
+    write: ['claim.submit', 'claim.approve', 'claim.pay']
+  },
+  timesheets: {
+    read: ['view.team', 'hours.edit', 'view.daily', 'fin'],
+    write: ['hours.edit', 'team.edit']
+  },
+  projects: {
+    read: ['view.port', 'view.proj'],
+    write: ['proj.edit', 'plan.edit', 'proj.assign', 's12', 'close', 'bid.win']
+  },
+  customers: {
+    read: ['view.port', 'view.proj', 'view.bid'],
+    write: ['proj.edit', 'bid.edit', 'bid.win']
+  },
+  materials: {
+    read: ['view.proj', 'view.port', 's4', 'cost.edit'],
+    write: ['proj.edit', 'cost.edit', 's4']
+  },
+  openings: {
+    read: ['view.proj', 'view.port'],
+    write: ['proj.assign', 'proj.edit', 's12', 's3', 's4', 's5', 's5acc', 'qc', 'ho', 'close']
+  },
+  drawings: {
+    read: ['view.proj', 's3'],
+    write: ['s3', 'proj.edit']
+  },
+  ncrs: {
+    read: ['view.proj', 'ncr', 'qc'],
+    write: ['ncr', 'qc']
+  },
+  dailies: {
+    read: ['view.daily', 'daily.edit', 'daily.ack'],
+    write: ['daily.edit', 'daily.ack']
+  },
+  issues: {
+    read: ['view.issues', 'issues.edit'],
+    write: ['issues.edit']
+  },
+  handovers: {
+    read: ['view.proj', 'ho'],
+    write: ['ho', 'close']
+  },
+  settings: {
+    read: ['view.port', 'view.proj', 'users'],
+    write: ['users', 'proj.edit', 'cost.edit']
+  },
+  assets: {
+    read: ['view.proj', 'view.daily', 'view.issues', 's4', 's5', 'qc', 'ncr', 'ho'],
+    write: ['proj.edit', 's3', 's4', 's5', 's5acc', 'qc', 'ncr', 'ho', 'daily.edit', 'issues.edit']
+  }
+};
+
+const PROJECT_SCOPED_COLLECTIONS = new Set([
+  'openings', 'drawings', 'ncrs', 'dailies', 'issues', 'handovers',
+  'sales', 'budgets', 'others', 'engagements', 'claims', 'cinvoices', 'timesheets'
+]);
+
+const PROJECT_FINANCIAL_FIELDS = [
+  'contractValue', 'value', 'budget', 'cost', 'margin', 'soTotal', 'quotedAmt', 'price', 'amount'
+];
+
+function hasAnyPerm(user, requiredKeys = []) {
+  if (!user || !Array.isArray(user.permissions)) return false;
+  if (user.role === 'admin' && user.permissions.includes('users')) return true;
+  return requiredKeys.some(k => user.permissions.includes(k));
+}
+
+function canReadCollection(collection, user) {
+  if (!user) return false;
+  const rule = COLLECTION_ACCESS_RULES[collection];
+  if (!rule) return false;
+  return hasAnyPerm(user, rule.read);
+}
+
+function canWriteCollection(collection, user) {
+  if (!user) return false;
+  const rule = COLLECTION_ACCESS_RULES[collection];
+  if (!rule) return false;
+  return hasAnyPerm(user, rule.write);
+}
+
+function isDocInUserScope(collection, doc, user) {
+  if (!user || !doc) return false;
+  if (user.role === 'admin' && user.permissions?.includes('users')) return true;
+
+  // User/role scoping
+  if (collection === 'users') {
+    if (user.permissions?.includes('users')) return true;
+    return doc.id === user.id || doc.uid === user.uid;
+  }
+  if (collection === 'roles') {
+    if (user.permissions?.includes('users')) return true;
+    return (doc.key || doc.id) === user.role;
+  }
+
+  // Project scoping when user.projects is an explicit array of allowed project IDs
+  if (Array.isArray(user.projects)) {
+    if (collection === 'projects') {
+      const pid = doc.id || doc.code;
+      if (pid && !user.projects.includes(pid)) return false;
+    } else if (PROJECT_SCOPED_COLLECTIONS.has(collection)) {
+      const pid = doc.project || doc.projectId || doc.proj;
+      if (pid && !user.projects.includes(pid)) return false;
+    }
+  }
+
+  // Contractor team scoping: contractors only see their own team's claims/engagements/timesheets
+  if (user.role === 'contractor' && user.team) {
+    if (['claims', 'engagements', 'timesheets'].includes(collection)) {
+      if (doc.team && doc.team !== user.team) return false;
+    }
+    if (collection === 'teams') {
+      const tid = doc.id || doc.code;
+      if (tid && tid !== user.team) return false;
+    }
+  }
+
+  return true;
+}
+
+function sanitizeDocForResponse(collection, doc, user) {
+  if (!doc || typeof doc !== 'object') return doc;
+  const clone = { ...doc };
+  delete clone.password;
+  delete clone.password_hash;
+  delete clone.admin_password_hash;
+  delete clone.client_secret;
+
+  const canSeeFinance = Boolean(user?.permissions?.includes('fin'));
+  if (!canSeeFinance && collection === 'projects') {
+    for (const f of PROJECT_FINANCIAL_FIELDS) {
+      if (f in clone) delete clone[f];
+    }
+  }
+  return clone;
+}
+
+function filterAndSanitizeCollectionForUser(collection, docs = [], user) {
+  if (!user || !Array.isArray(docs)) return [];
+
+  // Special handling for `users` collection in bootstrap:
+  // If user lacks 'users' admin permission, return ONLY their own sanitized user profile
+  if (collection === 'users' && !canReadCollection('users', user)) {
+    return docs
+      .filter(d => d.id === user.id || d.uid === user.uid)
+      .map(d => sanitizeDocForResponse('users', d, user));
+  }
+
+  if (!canReadCollection(collection, user)) {
+    return [];
+  }
+
+  return docs
+    .filter(d => isDocInUserScope(collection, d, user))
+    .map(d => sanitizeDocForResponse(collection, d, user));
+}
+
 module.exports = {
   PKEYS,
   ROLE_DEF,
   EXT_DENY,
+  COLLECTION_ACCESS_RULES,
   ssoSessions,
   parseCookies,
   computeEffectivePermissions,
   resolveRequestUser,
   normalizeApiPath,
-  enforceApiAuthentication
+  enforceApiAuthentication,
+  canReadCollection,
+  canWriteCollection,
+  isDocInUserScope,
+  sanitizeDocForResponse,
+  filterAndSanitizeCollectionForUser
 };

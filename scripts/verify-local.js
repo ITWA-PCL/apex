@@ -257,6 +257,204 @@ async function runVerification() {
   );
   console.log(' [OK] CI/CD & Deploy Script Hardening (pre-script SHA checkout & PostgreSQL healthcheck) verified');
 
+  // 9. Post-Login RBAC, Privilege Escalation Prevention & Data Scoping Verification
+  const collectionsRouter = require('../app/src/workflow/collections-api');
+  await db.setDoc(
+    'users',
+    'U01',
+    {
+      id: 'U01',
+      uid: 'U01',
+      email: 'admin@windowasia.com',
+      name: 'System Admin',
+      role: 'admin',
+      is_active: true,
+      password_hash: db.hashPassword('AdminStrongPass!999')
+    },
+    'test'
+  );
+  await db.setDoc(
+    'users',
+    'V01',
+    {
+      id: 'V01',
+      uid: 'V01',
+      email: 'viewer@windowasia.com',
+      name: 'Project Viewer',
+      role: 'viewer',
+      projects: ['P01'],
+      is_active: true,
+      password_hash: db.hashPassword('ViewerPass!111')
+    },
+    'test'
+  );
+  await db.setDoc(
+    'users',
+    'C01',
+    {
+      id: 'C01',
+      uid: 'C01',
+      email: 'sub@contractor.co.th',
+      name: 'Subcontractor Team 1',
+      role: 'contractor',
+      kind: 'external',
+      is_external: true,
+      use_ad_auth: false,
+      projects: ['P01'],
+      team: 'T01',
+      is_active: true,
+      password_hash: db.hashPassword('SubPass!222')
+    },
+    'test'
+  );
+  await db.setDoc(
+    'projects',
+    'P01',
+    { id: 'P01', code: 'P01', name: 'Project Alpha', contractValue: 5000000, budget: 3500000 },
+    'test'
+  );
+  await db.setDoc(
+    'projects',
+    'P02',
+    { id: 'P02', code: 'P02', name: 'Project Beta', contractValue: 8000000, budget: 6000000 },
+    'test'
+  );
+  await db.setDoc('budgets', 'B01', { id: 'B01', project: 'P01', amount: 3500000 }, 'test');
+  await db.setDoc('claims', 'CL01', { id: 'CL01', project: 'P01', team: 'T01', status: 'draft', workValue: 50000 }, 'test');
+  await db.setDoc('claims', 'CL02', { id: 'CL02', project: 'P01', team: 'T02', status: 'draft', workValue: 60000 }, 'test');
+
+  async function invokeCollectionsRoute(method, urlPath, userId, body = {}) {
+    return new Promise((resolve, reject) => {
+      const req = {
+        method,
+        path: urlPath,
+        url: urlPath,
+        originalUrl: urlPath,
+        headers: { cookie: `apex_session=test_${userId}` },
+        query: {},
+        body
+      };
+      rbac.ssoSessions.set(`test_${userId}`, {
+        userId,
+        email: `${userId}@windowasia.com`,
+        role: userId === 'U01' ? 'admin' : userId === 'V01' ? 'viewer' : 'contractor',
+        expiresAt: Date.now() + 60000
+      });
+      const res = {
+        statusCode: 200,
+        headers: {},
+        body: null,
+        setHeader(k, v) {
+          this.headers[k] = v;
+        },
+        status(code) {
+          this.statusCode = code;
+          return this;
+        },
+        json(payload) {
+          this.body = payload;
+          resolve({ statusCode: this.statusCode, body: payload });
+          return this;
+        }
+      };
+      rbac.resolveRequestUser(req, res, err => {
+        if (err) return reject(err);
+        rbac.enforceApiAuthentication(req, res, err2 => {
+          if (err2) return reject(err2);
+          collectionsRouter.handle(req, res, err3 => {
+            if (err3) return reject(err3);
+            resolve({ statusCode: res.statusCode, body: res.body });
+          });
+        });
+      });
+    });
+  }
+
+  // 9a. Viewer attempting privilege escalation via /api/v1/seed or /api/v1/db/users -> MUST be 403
+  const viewerSeedAttempt = await invokeCollectionsRoute('POST', '/api/v1/seed', 'V01', {
+    force: true,
+    seed: { users: [{ id: 'V01', role: 'admin' }] }
+  });
+  assert.strictEqual(viewerSeedAttempt.statusCode, 403, 'Viewer must receive 403 on POST /api/v1/seed');
+
+  const viewerEscalationPut = await invokeCollectionsRoute('PUT', '/api/v1/db/users/V01', 'V01', {
+    id: 'V01',
+    role: 'admin'
+  });
+  assert.strictEqual(viewerEscalationPut.statusCode, 403, 'Viewer must receive 403 on PUT /api/v1/db/users/V01');
+
+  const viewerRoleWrite = await invokeCollectionsRoute('POST', '/api/v1/db/roles', 'V01', {
+    id: 'viewer',
+    key: 'viewer',
+    perms: rbac.PKEYS
+  });
+  assert.strictEqual(viewerRoleWrite.statusCode, 403, 'Viewer must receive 403 on POST /api/v1/db/roles');
+
+  // Verify V01 is still viewer in DB
+  const v01After = await db.getDoc('users', 'V01');
+  assert.strictEqual(v01After.role, 'viewer', 'Viewer role must remain unchanged after failed escalation attempts');
+
+  // 9b. Viewer attempting to read forbidden collections & password hashes
+  const viewerGetUsers = await invokeCollectionsRoute('GET', '/api/v1/db/users', 'V01');
+  assert.strictEqual(viewerGetUsers.statusCode, 403, 'Viewer must receive 403 on GET /api/v1/db/users');
+
+  const viewerGetAdminDoc = await invokeCollectionsRoute('GET', '/api/v1/db/users/U01', 'V01');
+  assert.strictEqual(viewerGetAdminDoc.statusCode, 403, 'Viewer must receive 403 on GET /api/v1/db/users/U01');
+
+  const viewerGetBudgets = await invokeCollectionsRoute('GET', '/api/v1/db/budgets', 'V01');
+  assert.strictEqual(viewerGetBudgets.statusCode, 403, 'Viewer must receive 403 on GET /api/v1/db/budgets');
+
+  const viewerGetOutProject = await invokeCollectionsRoute('GET', '/api/v1/db/projects/P02', 'V01');
+  assert.strictEqual(viewerGetOutProject.statusCode, 403, 'Viewer must receive 403 on out-of-scope project P02');
+
+  const viewerBootstrap = await invokeCollectionsRoute('GET', '/api/v1/bootstrap', 'V01');
+  assert.strictEqual(viewerBootstrap.statusCode, 200, 'Viewer bootstrap should succeed with scoped data');
+  assert.strictEqual(viewerBootstrap.body.collections.budgets.length, 0, 'Viewer bootstrap must not expose budgets');
+  assert.strictEqual(viewerBootstrap.body.collections.projects.length, 1, 'Viewer bootstrap must only include assigned project P01');
+  assert.strictEqual(viewerBootstrap.body.collections.projects[0].id, 'P01');
+  assert.strictEqual(
+    viewerBootstrap.body.collections.projects[0].contractValue,
+    undefined,
+    'Viewer without fin permission must have financial fields stripped from projects'
+  );
+  assert.strictEqual(viewerBootstrap.body.collections.users.length, 1, 'Viewer bootstrap must only contain own user record');
+  assert.strictEqual(viewerBootstrap.body.collections.users[0].id, 'V01');
+  const rawBootstrapJson = JSON.stringify(viewerBootstrap.body);
+  assert.ok(!rawBootstrapJson.includes('password_hash'), 'Bootstrap response must NEVER leak password_hash');
+  assert.ok(!rawBootstrapJson.includes('pbkdf2_sha256'), 'Bootstrap response must NEVER leak PBKDF2 hash strings');
+
+  // Even Admin reading /api/v1/db/users must not receive password_hash in response
+  const adminGetUsers = await invokeCollectionsRoute('GET', '/api/v1/db/users', 'U01');
+  assert.strictEqual(adminGetUsers.statusCode, 200, 'Admin must be allowed to read /api/v1/db/users');
+  assert.ok(
+    !JSON.stringify(adminGetUsers.body).includes('password_hash'),
+    'Admin GET /api/v1/db/users must also strip password_hash from response'
+  );
+
+  // Admin attempting to re-seed when projects already exist must receive 409 already_seeded (even with force: true)
+  const adminReSeed = await invokeCollectionsRoute('POST', '/api/v1/seed', 'U01', {
+    force: true,
+    seed: { projects: [{ id: 'P99', name: 'Overwrite Attempt' }] }
+  });
+  assert.strictEqual(adminReSeed.statusCode, 409, 'POST /api/v1/seed must reject re-seeding once projects exist');
+
+  // 9c. Contractor team & claim status scoping
+  const contractorReadOtherTeamClaim = await invokeCollectionsRoute('GET', '/api/v1/db/claims/CL02', 'C01');
+  assert.strictEqual(
+    contractorReadOtherTeamClaim.statusCode,
+    403,
+    'Contractor T01 must receive 403 when reading T02 claim'
+  );
+  const contractorApproveOwnClaim = await invokeCollectionsRoute('PATCH', '/api/v1/db/claims/CL01', 'C01', {
+    status: 'approved'
+  });
+  assert.strictEqual(
+    contractorApproveOwnClaim.statusCode,
+    403,
+    'Contractor must receive 403 when attempting to self-approve a claim'
+  );
+  console.log(' [OK] Post-Login RBAC, Privilege Escalation Prevention & Collection/Project Scoping verified');
+
   console.log('=================================================================');
   console.log(' ✅ ALL LOCAL COMPILE & SECURITY/FINANCE CHECKS PASSED (0 ERRORS)');
   console.log('=================================================================');
