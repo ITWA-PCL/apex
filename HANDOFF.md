@@ -6,6 +6,24 @@
 
 ---
 
+## CFO / Track B Handoff — 2026-11-04 16:10 (+07:00)
+
+- **ผู้ส่งมอบ:** CFO / Track B (Claude Code บนเครื่อง CFO) · **Branch:** `feat/flow-cfo` (สร้างจาก `main` @ `3099d6f`)
+- **โฟลเดอร์ repo บนเครื่อง CFO:** `D:\Git\apex` (ไม่ใช่ `D:\Python\APEX` ตามเอกสารเดิม)
+- **สิ่งที่ส่งรอบนี้ (คำสั่งการทำงานเท่านั้น ไม่มี business code):**
+  - `AGENTS.md` หัวข้อ 4 "CFO / Track B — Local Work and Push-only Delivery" (11 กติกา) ตาม `APEX-CFO-CLAUDE-SETUP.md`
+  - `CLAUDE.md` ปรับเฉพาะส่วน CFO: ยกเลิก path บังคับ, `git pull origin develop` อัตโนมัติ, `winget install` อัตโนมัติ, `git add` ทั้งโฟลเดอร์, ส่งงานทุกครั้งที่จบ session และ `node scripts/open-pr.js` อัตโนมัติ — ไม่ได้แก้สคริปต์ของทีมเทคนิค
+- **ทดสอบ:** `node scripts/verify-local.js` ผ่าน 0 Errors (รันใน container `node:20-alpine` เพราะเครื่อง CFO ยังไม่มี Node.js)
+- **ตรวจพบ:** mockup `install-tracker_28.html` ของ CFO มีเนื้อหาเหมือน `Docs/install-tracker_26.html` ทุกตัวอักษร (v25–v28 เหมือนกัน) จึงไม่ต้องอัปเดต `app/public/index.html`
+- **ส่งต่อทีมเทคนิค:**
+  1. `CFO_CLAUDE_CODE_ONBOARDING.md` ยังมีคำสั่งเดิม (`open-pr.js`, `develop`, `winget install`) 6 จุด ขัดกับกติกาใหม่ — ไฟล์นี้ไม่ได้แก้ในรอบนี้
+  2. `scripts/verify-local.js` สร้างไฟล์ `app/data/local-store.json` ทุกครั้งที่รัน และ path นี้ไม่อยู่ใน `.gitignore` เสี่ยง commit ข้อมูลทดสอบติดไป (รอบนี้ลบทิ้งก่อน commit แล้ว)
+  3. เครื่อง CFO ยังไม่มี Node.js
+- **ก้าวต่อไป:** CFO แจ้งรายการปรับหน้าจอ / ขั้นตอน (T3.3–T3.6) แล้ว Claude แก้ใน `app/public/index.html` / `app/src/workflow/` และส่งขึ้น `feat/flow-cfo` ทีละส่วน
+- **ยังไม่ได้เปิด PR, merge หรือ deploy จากเครื่อง CFO**
+
+---
+
 ## Latest Handoff Status (จุดพักงานล่าสุด — พร้อมกลับมาทำต่อได้ทันที)
 
 - **วันที่ / เวลาบันทึกส่งมอบ:** `2026-10-31 18:25 (+07:00)`

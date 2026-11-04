@@ -2,7 +2,7 @@
 
 > **Project:** **APEX** (`https://apex.windowasia.com`)
 > **Repository:** `https://github.com/ITWA-PCL/apex.git`
-> **Updated:** 2026-10-28 20:45 (+07:00)
+> **Updated:** 2026-11-04 16:10 (+07:00)
 > **Status Legend:** `[x]` Completed | `[/]` In Progress | `[ ]` Pending
 
 ---
@@ -48,6 +48,7 @@
 
 - [x] **T3.1 [Track B]** โครงสร้างพื้นฐานทั้ง 10 เมนูหลัก + API ซิงค์ข้อมูล 22 Collections แบบ Real-time (`app/src/workflow/collections-api.js`)
 - [x] **T3.2 [Track B]** เครื่องคำนวณการเงิน (`app/src/workflow/finance-engine.js`): สูตรใบเบิกงวดช่าง 8 ขั้นตอน (Waterfall), การยกเว้น VAT ค่าขนส่ง, และล็อกวันที่ `F-17` ตาม `allAccDate`
+- [x] **T3.0 [Track B - CFO]** ตั้งค่าเครื่อง CFO ตาม `APEX-CFO-CLAUDE-SETUP.md` ระยะที่ 1: กิ่ง `feat/flow-cfo` + กติกา "CFO / Track B — Local Work and Push-only Delivery" (`AGENTS.md` หัวข้อ 4, `CLAUDE.md` หัวข้อ 3 และ 5) — 2026-11-04
 - [ ] **T3.3 [Track B - CFO]** ตรวจสอบและปรับปรุงรายละเอียดทางธุรกิจของระบบประมูลงาน (`bidding`) และการโอนใบประมูลที่ชนะเป็นโครงการใหม่
 - [ ] **T3.4 [Track B - CFO]** ตรวจสอบและปรับปรุงขั้นตอนการตั้งค่าโครงการ 7 ขั้นตอน (`setupSteps` 1–7), การนำเข้าไฟล์ SO จาก SAP, และแผนงบประมาณ (`budgets`)
 - [ ] **T3.5 [Track B - CFO]** ตรวจสอบขั้นตอนหน้างาน `S1`–`S8`, จุดหยุดตรวจ Hold Points (◆), การสแกน QR รับของหน้างาน (`S4`), การส่งตรวจรายจุด (`S5`), และการตรวจ QC (`S6`) / NCR
