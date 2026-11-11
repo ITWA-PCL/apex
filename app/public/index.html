@@ -443,6 +443,14 @@ input[type=time]{background:var(--surface);border:1px solid var(--line);border-r
 .dicon:hover{color:var(--accent)}
 .dwrap .dnative{position:absolute;right:0;bottom:0;width:1px;height:1px;opacity:0;padding:0;border:0;min-height:0;pointer-events:none}
 label.row .dwrap,.row .dwrap{width:auto;min-width:150px}
+/* ช่องกรอกมูลค่าเงิน: แสดง 1,234,567.00 ทับช่องตอนไม่ได้พิมพ์ (ค่าจริงในช่องยังเป็นตัวเลขล้วน) */
+.mwrap{position:relative;display:inline-block;max-width:100%;vertical-align:middle}
+.mwrap.mfill{display:block;width:100%}.mwrap.mfill>input{width:100%}
+.mwrap>.mfmt{position:absolute;inset:0;display:none;align-items:center;pointer-events:none;white-space:nowrap;overflow:hidden;font-variant-numeric:tabular-nums}
+.mwrap.mshow:not(.medit)>input{color:transparent}
+.mwrap.mshow:not(.medit)>.mfmt{display:flex}
+input[data-money]{appearance:textfield;-moz-appearance:textfield}
+input[data-money]::-webkit-inner-spin-button,input[data-money]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
 .fmbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 12px;padding:8px 10px;border:1px dashed var(--line);border-radius:10px;background:var(--surface-2)}
 .fmbl{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-3);margin-right:4px}.fmbl svg,.vbtn svg{flex:none}
 .fmbl svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.5}
@@ -693,15 +701,15 @@ tr.dim td{opacity:.55}.ups{display:grid;grid-template-columns:repeat(auto-fill,m
                     <label class="vm"><input type="radio" name="vmode" value="freeall"><b>3.4 ฟรีค่าติดตั้งและค่าขนส่ง</b><span>ค่าสินค้าอย่างเดียว</span></label>
                   </div>
                   <div class="form-grid" style="margin-top:10px">
-                    <label id="lvGoods"><span>ค่าสินค้า</span><input type="number" id="pvGoods" min="0" step="1000" placeholder="0"></label>
-                    <label id="lvInst"><span>ค่าติดตั้ง</span><input type="number" id="pvInst" min="0" step="1000" placeholder="0"></label>
-                    <label id="lvDlv"><span>ค่าขนส่ง</span><input type="number" id="pvDlv" min="0" step="100" placeholder="0"></label>
+                    <label id="lvGoods"><span>ค่าสินค้า</span><input type="number" id="pvGoods" min="0" step="any" placeholder="0"></label>
+                    <label id="lvInst"><span>ค่าติดตั้ง</span><input type="number" id="pvInst" min="0" step="any" placeholder="0"></label>
+                    <label id="lvDlv"><span>ค่าขนส่ง</span><input type="number" id="pvDlv" min="0" step="any" placeholder="0"></label>
                     <label>ค่าสินค้า/ค่าติดตั้งที่กรอก<select id="pValueBasis"><option value="inc">รวม VAT 7% แล้ว</option><option value="ex">ยังไม่รวม VAT</option></select></label>
                   </div><p class="hint" id="pValHint" style="margin:8px 0 0"></p></fieldset>
                 <fieldset id="pBudSet"><legend>4 · งบประมาณต้นทุน (บาท · ไม่รวม VAT)</legend><div class="form-grid">
-                  <label>ค่าสินค้า<input type="number" id="pBudMat" min="0" step="1000" placeholder="0"></label>
-                  <label>ค่าแรงจ้างช่าง<input type="number" id="pBudLab" min="0" step="1000" placeholder="0"></label>
-                  <label>ค่าใช้จ่ายอื่น ๆ<input type="number" id="pBudOth" min="0" step="1000" placeholder="0"></label>
+                  <label>ค่าสินค้า<input type="number" id="pBudMat" min="0" step="any" placeholder="0"></label>
+                  <label>ค่าแรงจ้างช่าง<input type="number" id="pBudLab" min="0" step="any" placeholder="0"></label>
+                  <label>ค่าใช้จ่ายอื่น ๆ<input type="number" id="pBudOth" min="0" step="any" placeholder="0"></label>
                 </div><p class="hint" id="pBudTot" style="margin:8px 0 0"></p></fieldset>
               </div>
               <div class="row" style="margin-top:12px"><button class="btn primary" type="submit" id="pfSave">บันทึกข้อมูลโครงการ</button><span class="hint" id="pfNext"></span></div>
@@ -1480,8 +1488,11 @@ $('teamForm').addEventListener('submit',async e=>{e.preventDefault();
 /* ---------- money: helpers ---------- */
 const nf=new Intl.NumberFormat('th-TH',{maximumFractionDigits:0});
 const qf=new Intl.NumberFormat('th-TH',{maximumFractionDigits:2});
-const baht=v=>v==null||v===''||isNaN(v)?'–':nf.format(Math.round(v));
-const mb=v=>{if(v==null||isNaN(v))return '–';return Math.abs(v)>=1e6?(v/1e6).toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})+' ลบ.':nf.format(Math.round(v))+' บ.';};
+/* มูลค่าเงินแสดงทศนิยม 2 ตำแหน่ง พร้อมจุลภาคหลักพัน เช่น 729,561.20 (|| 0 กัน -0.00) */
+const nf2=new Intl.NumberFormat('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2});
+const moneyR2=v=>(Math.round(Number(v)*100)/100)||0;
+const baht=v=>v==null||v===''||isNaN(v)?'–':nf2.format(moneyR2(v));
+const mb=v=>{if(v==null||isNaN(v))return '–';return Math.abs(v)>=1e6?nf2.format(moneyR2(v/1e6))+' ลบ.':nf2.format(moneyR2(v))+' บ.';};
 const toNum=v=>{if(v==null||v==='')return null;if(typeof v==='number')return v;let s=String(v).trim().replace(/[,\s฿]/g,'');let neg=false;if(/-$/.test(s)){neg=true;s=s.slice(0,-1);}if(/^\(.*\)$/.test(s)){neg=true;s=s.slice(1,-1);}if(!s)return null;const n=Number(s);return isNaN(n)?null:(neg?-n:n);};
 const sum=(a,f)=>a.reduce((t,x)=>t+(Number(f(x))||0),0);
 const lineAmt=l=>l.amount!=null&&l.amount!==''?Number(l.amount):(Number(l.qty)||0)*(Number(l.price)||0);
@@ -2194,9 +2205,27 @@ let s2Signer='';try{s2Signer=localStorage.getItem('s2Signer')||'';}catch(_){}
 let assetsNs=null;
 const photoCache={},photoLoading=new Set();let rTimer;
 const scheduleRender=()=>{clearTimeout(rTimer);rTimer=setTimeout(renderAll,60);};
+/* ไฟล์แนบ: js/apex-cloud-bridge.js (Track A) ให้เฉพาะ put(key,dataUrl) / get(key) แต่หน้าจอเรียก upload(blob) → {id,url}
+   จึงแปลงให้ใช้กันได้ — เก็บไฟล์เป็น data URL ในชุดข้อมูล assets (คุมสิทธิ์ด้วย RBAC) และโหลดกลับด้วย get(id) */
+const ASSET_MAX=15e6;
+function assetsCompat(a){
+  if(!a)return null;if(typeof a.upload==='function')return a;if(typeof a.put!=='function')return null;
+  return{get:typeof a.get==='function'?k=>a.get(k):null,
+    upload:async blob=>{if(blob.size>ASSET_MAX)throw{code:'too_big'};
+      const id='as'+Date.now().toString(36)+Math.random().toString(36).slice(2,8),data=await blobToData(blob);
+      await a.put(id,data);photoCache[id]=data;return{id,url:''};}};
+}
+/* โหลดไฟล์ที่ยังไม่อยู่ในแคช: ลอง assets ก่อน ถ้าไม่มีจึงลองชุดข้อมูลเดิม (photos / files) */
+function lazyAsset(id,col){
+  if(!id||!db||photoLoading.has(id))return;photoLoading.add(id);
+  const fromCol=()=>db.doc(col+'/'+id).get().then(s=>{const d=s&&s.exists&&s.data();return d&&d.data;});
+  (assetsNs?.get?assetsNs.get(id).then(src=>src||fromCol(),fromCol):fromCol())
+    .then(src=>{if(src){photoCache[id]=src;scheduleRender();}}).catch(()=>{});
+}
+async function delAsset(id,col){if(!id)return;if(assetsNs)try{await db.doc('assets/'+id).delete();return;}catch(_){}try{await db.doc(col+'/'+id).delete();}catch(_){}}
 function photoSrc(e){
   if(!e)return '';if(e.src)return e.src;if(photoCache[e.id])return photoCache[e.id];
-  if(e.id&&db&&!photoLoading.has(e.id)){photoLoading.add(e.id);db.doc('photos/'+e.id).get().then(s=>{const d=s&&s.exists&&s.data();if(d&&d.data){photoCache[e.id]=d.data;scheduleRender();}}).catch(()=>{});}
+  lazyAsset(e.id,'photos');
   return '';
 }
 const isS2=e=>!e.stage||e.stage===2;
@@ -2241,7 +2270,7 @@ async function addPhotos(code,files,meta){
 }
 async function delPhoto(code,i){
   const o=state.openings[code];if(!o)return;const list=[...(o.photos||[])],[e]=list.splice(i,1);
-  await write(async()=>{await db.doc('openings/'+code).update({photos:list,...stamp()});if(e&&e.id&&!e.src)try{await db.doc('photos/'+e.id).delete();}catch(_){}},'ลบรูปแล้ว');
+  await write(async()=>{await db.doc('openings/'+code).update({photos:list,...stamp()});if(e&&e.id&&!e.src)await delAsset(e.id,'photos');},'ลบรูปแล้ว');
 }
 /* lightbox */
 let lbState=null;
@@ -2397,10 +2426,16 @@ async function saveProjList(key,list,msg){
 async function addProjDoc(form){
   const p=state.proj,key=form.dataset.pd,f=Object.fromEntries(new FormData(form).entries()),P=state.projects[p]||{};
   const file=form.querySelector('input[type=file]')?.files[0];
+  /* แก้ไข Quotation เดิม: ไฟล์ไม่บังคับ (ใช้ไฟล์เดิม) */
+  if(key==='quotes'&&form.dataset.pdedit){const id=form.dataset.pdedit,old=(P.quotes||[]).find(x=>x.id===id);if(!old)return;const no=f.no.trim();
+    if(!no){toast('ใส่เลขที่ Quotation');return;}if((P.quotes||[]).some(q=>q.id!==id&&q.no===no)){toast('มี Quotation เลขนี้แล้ว');return;}
+    const patch={no,part:(f.part||'').trim(),date:f.date||'',signer:(f.signer||'').trim(),...(f.amount!==undefined?{amount:toNum(f.amount)||0}:{}),editedAt:new Date().toISOString()};
+    if(file){if(busy){toast('กำลังบันทึกอยู่ ลองอีกครั้ง');return;}busy=true;try{patch.file=await storeFile(file,p);}catch(e){busy=false;toast(e&&e.code==='too_big'?'ไฟล์ใหญ่เกิน 900 KB':'แนบไฟล์ไม่สำเร็จ');return;}busy=false;}
+    await setProjDoc('quotes',id,patch,`แก้ไข Quotation ${no} แล้ว`);return;}
   if(!file){toast('ต้องแนบไฟล์เอกสารที่ลงนามแล้ว');return;}
   let item={id:'x'+Date.now().toString(36),at:new Date().toISOString(),...(me?{by:me}:{})};
   if(key==='quotes'){if(!f.no.trim()){toast('ใส่เลขที่ Quotation');return;}if((P.quotes||[]).some(q=>q.no===f.no.trim())){toast('มี Quotation เลขนี้แล้ว');return;}
-    Object.assign(item,{no:f.no.trim(),date:f.date||'',amount:toNum(f.amount)||0,signer:f.signer.trim()});}
+    Object.assign(item,{no:f.no.trim(),part:(f.part||'').trim(),date:f.date||'',amount:toNum(f.amount)||0,signer:f.signer.trim()});}
   else if(key==='extensions'){if(!f.newEnd){toast('ใส่วันสิ้นสุดใหม่');return;}const cur=effEnd(p);if(cur&&f.newEnd<=cur){toast(`วันสิ้นสุดใหม่ต้องหลัง ${thDateY(cur)}`);return;}
     Object.assign(item,{no:'EOT-'+pad2((P.extensions||[]).length+1),date:f.date||today(),docNo:f.docNo.trim(),prevEnd:cur,newEnd:f.newEnd,days:cur?dayDiff(cur,f.newEnd):0,reason:f.reason.trim(),status:f.status||'pending'});}
   else{if(!f.desc.trim()){toast('ใส่รายละเอียดงานเพิ่ม');return;}
@@ -2429,13 +2464,14 @@ function renderProjDocs(){
   <section class="fsec pdsec">
     <div class="card-head"><h2>1.1 · Quotation ที่ลูกค้าลงนาม <span class="pill ${qs.some(q=>q.file)?'good':'warn'}">${qs.length} ใบ</span></h2><span class="sub">1 โครงการมีได้หลายใบ · ต้องแนบ QT ที่ลูกค้าลงนามแล้วอย่างน้อย 1 ใบ</span></div>
     ${qs.length?`<div class="tablewrap"><table class="money"><thead><tr><th>Quotation no.</th><th>วันที่</th><th>ผู้ลงนามฝั่งลูกค้า</th>${canFin?'<th class="r">มูลค่า (บาท)</th>':''}<th>ไฟล์</th><th></th></tr></thead><tbody>
-      ${qs.map(q=>`<tr><td class="mono">${esc(q.no)}</td><td>${thDateY(q.date)}</td><td>${esc(q.signer||'–')}</td>${canFin?`<td class="r num">${q.amount?baht(q.amount):'–'}</td>`:''}<td>${fileLink('quotes',q)}</td><td>${pdDel('quotes',q)}</td></tr>`).join('')}</tbody></table></div>`:'<div class="msg err">ยังไม่มี Quotation ที่ลงนาม · ขั้น “เปิดโครงการ” จะยังไม่ครบจนกว่าจะแนบ</div>'}
-    ${pdForm==='quotes'?`<form class="fform" data-pd="quotes" style="margin-top:10px"><div class="form-grid">
-      <label>Quotation no. *<input type="text" name="no" required placeholder="QT2609-0112"></label>
-      <label>วันที่ QT<input type="date" name="date"></label>
-      <label>ผู้ลงนามฝั่งลูกค้า<input type="text" name="signer" placeholder="ชื่อ-ตำแหน่ง"></label>
-      ${canFin?'<label>มูลค่าตาม QT (บาท)<input type="number" name="amount" min="0" step="any"></label>':''}
-      ${fileIn}</div>${formBtns.replace('data-fin="cancel-form"','data-pdform=""')}</form>`:`<div class="row" style="margin-top:10px"><button class="btn" data-pdform="quotes" ${ro}>+ เพิ่ม Quotation</button></div>`}
+      ${qs.map(q=>`<tr><td class="mono">${esc(q.no)}${q.part?`<span class="sub2">${esc(q.part)}</span>`:''}</td><td>${thDateY(q.date)}</td><td>${esc(q.signer||'–')}</td>${canFin?`<td class="r num">${q.amount?baht(q.amount):'–'}</td>`:''}<td>${fileLink('quotes',q)}</td><td class="row" style="flex-wrap:nowrap;gap:6px">${canWrite?`<button class="btn sm" data-pdform="quotes:${esc(q.id)}">แก้ไข</button>`:''}${pdDel('quotes',q)}</td></tr>`).join('')}</tbody></table></div>${canFin&&qs.length>1?`<p class="hint" style="margin:6px 0 0">รวม ${qs.length} ใบ ${baht(sum(qs,q=>q.amount))} บาท · มูลค่าโครงการไม่เปลี่ยนอัตโนมัติ ปรับที่ “มูลค่าโครงการ” ด้านบนถ้าต้องการ</p>`:''}`:'<div class="msg err">ยังไม่มี Quotation ที่ลงนาม · ขั้น “เปิดโครงการ” จะยังไม่ครบจนกว่าจะแนบ</div>'}
+    ${String(pdForm).startsWith('quotes')?(()=>{const eq=pdForm.startsWith('quotes:')?qs.find(x=>x.id===pdForm.slice(7)):null;return `<form class="fform" data-pd="quotes" ${eq?`data-pdedit="${esc(eq.id)}"`:''} style="margin-top:10px">${eq?`<strong>แก้ไข Quotation ${esc(eq.no)}</strong>`:''}<div class="form-grid">
+      <label>Quotation no. *<input type="text" name="no" required placeholder="QT2609-0112" value="${esc(eq?.no||'')}"></label>
+      <label>ส่วนงาน<input type="text" name="part" placeholder="เช่น หน้าต่าง อาคาร A (เว้นว่างได้)" value="${esc(eq?.part||'')}"></label>
+      <label>วันที่ QT<input type="date" name="date" value="${esc(eq?.date||'')}"></label>
+      <label>ผู้ลงนามฝั่งลูกค้า<input type="text" name="signer" placeholder="ชื่อ-ตำแหน่ง" value="${esc(eq?.signer||'')}"></label>
+      ${canFin?`<label>มูลค่าตาม QT (บาท)<input type="number" name="amount" min="0" step="any" value="${esc(eq?.amount??'')}"></label>`:''}
+      ${eq?`<label class="fld">${eq.file?'เปลี่ยนไฟล์ (ไม่เลือก = ใช้ไฟล์เดิม)':'ไฟล์ที่ลงนามแล้ว (PDF/รูป)'}<input type="file" accept="application/pdf,image/*"></label>`:fileIn}</div>${formBtns.replace('data-fin="cancel-form"','data-pdform=""')}</form>`;})():`<div class="row" style="margin-top:10px"><button class="btn" data-pdform="quotes" ${ro}>+ เพิ่ม Quotation</button></div>`}
   </section>
   <section class="fsec pdsec">
     <div class="card-head"><h2>2.1 · การขยายระยะเวลาดำเนินการ ${ex.length?`<span class="pill ${extDays(p)?'warn':''}">${extDays(p)?`ขยายแล้ว ${extDays(p)} วัน`:ex.length+' ครั้ง'}</span>`:''}</h2><span class="sub">ต้องแนบหนังสือขอขยายระยะเวลา · วันสิ้นสุดของโครงการเปลี่ยนเมื่อสถานะเป็น “อนุมัติแล้ว”</span></div>
@@ -2507,7 +2543,8 @@ function renderProjList(){
       <span class="pc-foot">${canFin&&projValue(p)?`<span>${mb(vxP(p))} <span class="hint">${vatTag()}</span></span>`:'<span></span>'}<span>${s.open.length?`<span class="pill ${s.A?'bad':'warn'}">NCR ${s.open.length}</span>`:''}${sd<steps.length?` <span class="pill warn">ตั้งค่า ${sd}/${steps.length}</span>`:''}</span></span>
     </button>`;}).join('')}</div>`:`<div class="card empty">${projs.length?'ไม่มีโครงการในสถานะนี้':'ยังไม่มีโครงการ กด “เปิดโครงการใหม่” เพื่อเริ่ม'}</div>`}`;
 }
-function goRates(){state.teamProj=state.proj;state.teamSub='rate';setView('team');}
+/* แท็บอัตราค่าจ้างมีเฉพาะฝั่งผู้รับเหมาภายนอก — ต้องสลับฝั่งให้ด้วย ไม่อย่างนั้นถูกดีดกลับไปหน้าภาพรวม */
+function goRates(){state.teamProj=state.proj;state.teamSide='ex';try{localStorage.setItem('teamSide','ex');}catch(_){}state.teamSub='rate';setView('team');}
 function startNewProject(){state.view='proj';state.plist=false;pfMode='new';$('projForm').reset();$('pDur').textContent='';$('pBudTot').textContent='';setVMode('turnkey');setTab('setup');fillProjForm();$('pCode').focus();window.scrollTo({top:0});}
 $('projList').addEventListener('click',e=>{const g=x=>e.target.closest(x);let b;
   if(b=g('[data-plf]')){plFilter=b.dataset.plf;try{localStorage.setItem('plFilter',plFilter);}catch(_){}renderProjList();return;}
@@ -3896,7 +3933,7 @@ async function patchAdd(engId,addId,fn,msg){const x=state.engagements.find(e=>e.
 /* ---------- form item picker: user chooses what goes into each form · nothing chosen = blank form ---------- */
 let pk=null,fmPick=null;
 const PICK={
-  'F-00':{kind:'rec',src:p=>state.bids.flatMap(b=>(b.quotes||[]).filter(q=>q.gen).map(q=>({id:b.id+'|'+q.no,t:q.no+' R'+q.rev,s:`${b.name} · ${b.customer||''}`,st:q.status==='accepted'?'ลูกค้ายอมรับ':q.sentAt?'ยื่นแล้ว':'ร่าง',pre:b.id===bdSel}))),pl:'ของงานที่เปิดอยู่'},
+  'F-00':{kind:'rec',src:p=>state.bids.flatMap(b=>(b.quotes||[]).filter(q=>q.gen).map(q=>({id:b.id+'|'+q.no,t:q.no+' R'+q.rev+(q.part?' · '+q.part:''),s:`${b.name} · ${b.customer||''}`,st:q.status==='accepted'?'ลูกค้ายอมรับ':q.sentAt?'ยื่นแล้ว':'ร่าง',pre:b.id===bdSel}))),pl:'ของงานที่เปิดอยู่'},
   'F-01':{kind:'op',pre:o=>(o.stage||0)<2,pl:'ยังไม่สำรวจ'},
   'F-03':{kind:'op',pre:o=>o.stage===3,pl:'รอรับของ'},
   'F-04':{kind:'op',pre:o=>o.stage===4,pl:'กำลังติดตั้ง'},
@@ -4478,8 +4515,20 @@ async function saveHours(){
 const BST={lead:['รับข้อมูล / โอกาส',''],survey:['สำรวจ / ถอดแบบ',''],quoting:['จัดทำราคา','warn'],submitted:['ยื่นใบเสนอราคาแล้ว','acc'],negotiate:['ต่อรอง / รอผล','acc'],won:['ได้งาน','good'],lost:['ไม่ได้งาน','bad'],cancel:['ยกเลิก','']};
 const BOPEN=['lead','survey','quoting','submitted','negotiate'];
 const LOST_R=['ราคาสูงกว่าคู่แข่ง','ระยะเวลาส่งมอบ','สเปค / คุณภาพ','ความสัมพันธ์ / ผู้รับเหมาหลักเลือกเจ้าอื่น','ลูกค้ายกเลิก / เลื่อนโครงการ','อื่น ๆ'];
-let bdView='board',bdSel=null,bdQ='',bdSales='',bdForm=null,bdQt=false,bdAct=false,bdOpen=false,bdLost=false,bdYear='all';
-const bidVal=b=>{const q=(b.quotes||[]).filter(x=>x.status!=='draft').at(-1)||(b.quotes||[]).at(-1);return q?Number(q.amount)||0:Number(b.est)||0;};
+let bdView='board',bdSel=null,bdQ='',bdSales='',bdForm=null,bdQt=false,bdAct=false,bdOpen=false,bdLost=false,bdWin=false,bdYear='all';
+/* 1 งานมีใบเสนอราคาได้หลายใบแยกตามส่วนงาน (part) · แต่ละส่วนงานมี Rev ของตัวเอง · ใบเก่าในส่วนงานเดียวกันถือว่าถูกแทนที่ */
+const qPart=q=>String(q?.part||'');
+const qPartLbl=q=>qPart(q)||'ส่วนงานหลัก';
+const qParts=b=>[...new Set((b.quotes||[]).map(qPart))];
+const qOfPart=(b,p)=>(b.quotes||[]).filter(q=>qPart(q)===p);
+/* ใบที่ใช้คิดมูลค่าของแต่ละส่วนงาน: ใบล่าสุดที่ไม่ใช่ร่าง (ถ้ามีแต่ร่างใช้ร่างล่าสุด) · ได้งานแล้วใช้เฉพาะใบที่ลูกค้ายอมรับ */
+const qCur=b=>{const acc=(b.quotes||[]).filter(q=>q.status==='accepted');if(acc.length)return acc;return qParts(b).map(p=>{const a=qOfPart(b,p);return a.filter(x=>x.status!=='draft').at(-1)||a.at(-1);});};
+const qSuper=(qs,i)=>qs.slice(i+1).some(x=>qPart(x)===qPart(qs[i]));
+const qMore=b=>{const n=qParts(b).length;return n>1?` <span class="pill">${n} ส่วนงาน</span>`:'';};
+const bidVal=b=>{const c=qCur(b);return c.length?sum(c,q=>q.amount):Number(b.est)||0;};
+/* มูลค่ารวม VAT: ใบเสนอราคาที่สร้างในระบบใช้ยอดจริง (ค่าขนส่งไม่มี VAT) · ไฟล์จากระบบอื่นไม่มีรายการแยก จึงคิด VAT ทั้งยอด */
+const qInc=q=>q&&q.total!=null?Number(q.total)||0:Math.round((Number(q?.amount)||0)*(1+VAT)*100)/100;
+const bidInc=b=>{const c=qCur(b);return c.length?Math.round(sum(c,qInc)*100)/100:Math.round((Number(b.est)||0)*(1+VAT)*100)/100;};
 const bidQt=b=>(b.quotes||[]).at(-1);
 const nextBidNo=()=>{const t=today(),pre=`BD-${t.slice(2,4)}${t.slice(5,7)}-`;return pre+pad3(state.bids.filter(b=>String(b.no).startsWith(pre)).length+1);};
 const nextQtNo=()=>{const t=today(),pre=`QT${t.slice(2,4)}${t.slice(5,7)}-`,all=state.bids.flatMap(b=>(b.quotes||[]).map(q=>q.no)).concat(Object.values(state.projects).flatMap(p=>(p.quotes||[]).map(q=>q.no))).filter(n=>String(n).startsWith(pre));return pre+String(all.length+1).padStart(4,'0');};
@@ -4502,12 +4551,12 @@ function renderBid(){
     ${bdForm==='new'?bidForm({no:nextBidNo(),date:t,status:'lead',prob:30,sales:curUser()?.name||''}):''}
     ${bdView==='board'?`<div class="bdboard">${[...BOPEN,'won','lost'].map(s=>{const xs=list.filter(b=>b.status===s);return `<div class="bdcol"><div class="bdch"><span class="pill ${BST[s][1]}">${BST[s][0]}</span><span class="hint">${xs.length} · ${mb(sum(xs,bidVal))}</span></div>${xs.map(b=>bidCard(b,t)).join('')||'<div class="hint" style="padding:8px">–</div>'}</div>`;}).join('')}</div>`
     :`<div class="tablewrap"><table class="money"><thead><tr><th>เลขที่</th><th>ชื่องาน</th><th>ลูกค้า</th><th>ผู้รับผิดชอบ</th><th>ใบเสนอราคาล่าสุด</th><th class="r">มูลค่า (ไม่รวม VAT)</th><th class="r">โอกาส</th><th>ติดตามครั้งถัดไป</th><th>สถานะ</th></tr></thead><tbody>
-      ${list.length?list.map(b=>{const q=bidQt(b);return `<tr class="click ${bdSel===b.id?'on':''}" data-bdopen="${esc(b.id)}"><td class="mono">${esc(b.no)}</td><td><strong>${esc(b.name)}</strong>${b.location?`<span class="sub2">${esc(b.location)}</span>`:''}</td><td>${esc(b.customer||'')}</td><td>${esc(b.sales||'–')}</td><td class="mono">${q?`${esc(q.no)} <span class="hint">R${q.rev}</span>`:'<span class="hint">ยังไม่มี</span>'}</td><td class="r num">${baht(bidVal(b))}</td><td class="r num">${b.prob??'–'}%</td><td>${b.next&&BOPEN.includes(b.status)?`<span class="${b.next<=t?'neg':''}">${thDate(b.next)}</span>`:'–'}</td><td><span class="pill ${BST[b.status]?.[1]}">${BST[b.status]?.[0]}</span>${b.project?` <span class="pill good mono">${esc(b.project)}</span>`:''}${WAITING.includes(b.status)&&b.wait?.reason?`<span class="sub2">⏳ ${esc(b.wait.reason)}</span>`:''}</td></tr>`;}).join(''):'<tr><td colspan="9" class="empty">ยังไม่มีการเสนองาน</td></tr>'}
+      ${list.length?list.map(b=>{const q=bidQt(b);return `<tr class="click ${bdSel===b.id?'on':''}" data-bdopen="${esc(b.id)}"><td class="mono">${esc(b.no)}</td><td><strong>${esc(b.name)}</strong>${b.location?`<span class="sub2">${esc(b.location)}</span>`:''}</td><td>${esc(b.customer||'')}</td><td>${esc(b.sales||'–')}</td><td class="mono">${q?`${esc(q.no)} <span class="hint">R${q.rev}</span>${qMore(b)}`:'<span class="hint">ยังไม่มี</span>'}</td><td class="r num">${baht(bidVal(b))}</td><td class="r num">${b.prob??'–'}%</td><td>${b.next&&BOPEN.includes(b.status)?`<span class="${b.next<=t?'neg':''}">${thDate(b.next)}</span>`:'–'}</td><td><span class="pill ${BST[b.status]?.[1]}">${BST[b.status]?.[0]}</span>${b.project?` <span class="pill good mono">${esc(b.project)}</span>`:''}${WAITING.includes(b.status)&&b.wait?.reason?`<span class="sub2">⏳ ${esc(b.wait.reason)}</span>`:''}</td></tr>`;}).join(''):'<tr><td colspan="9" class="empty">ยังไม่มีการเสนองาน</td></tr>'}
       </tbody></table></div>`}
   </div>
   ${sel?bidDetail(sel):''}`;
 }
-function bidCard(b,t){const q=bidQt(b),late=b.next&&BOPEN.includes(b.status)&&b.next<=t;return `<button class="bdcard ${bdSel===b.id?'on':''}" data-bdopen="${esc(b.id)}"><span class="mono hint">${esc(b.no)}</span><strong>${esc(b.name)}</strong><span class="hint">${esc(b.customer||'')}</span><span class="row" style="justify-content:space-between"><b class="num">${mb(bidVal(b))}</b>${BOPEN.includes(b.status)?`<span class="pill">${b.prob??0}%</span>`:''}</span>${q?`<span class="hint mono">${esc(q.no)} · R${q.rev}${q.sentAt?' · ส่ง '+thDate(q.sentAt):' · ร่าง'}</span>`:''}${WAITING.includes(b.status)?(b.wait?.reason?`<span class="hint wr">⏳ ${esc(b.wait.reason)}</span>`:'<span class="hint neg">⏳ ยังไม่ระบุสาเหตุที่รอ</span>'):''}${late?`<span class="pill bad">ติดตาม ${thDate(b.next)}</span>`:b.next&&BOPEN.includes(b.status)?`<span class="hint">ติดตาม ${thDate(b.next)}</span>`:''}${b.project?`<span class="pill good mono">โครงการ ${esc(b.project)}</span>`:b.status==='won'?'<span class="pill warn">รอเปิดโครงการ</span>':''}</button>`;}
+function bidCard(b,t){const q=bidQt(b),late=b.next&&BOPEN.includes(b.status)&&b.next<=t;return `<button class="bdcard ${bdSel===b.id?'on':''}" data-bdopen="${esc(b.id)}"><span class="mono hint">${esc(b.no)}</span><strong>${esc(b.name)}</strong><span class="hint">${esc(b.customer||'')}</span><span class="row" style="justify-content:space-between"><b class="num">${mb(bidVal(b))}</b>${BOPEN.includes(b.status)?`<span class="pill">${b.prob??0}%</span>`:''}</span>${q?`<span class="hint mono">${esc(q.no)} · R${q.rev}${q.sentAt?' · ส่ง '+thDate(q.sentAt):' · ร่าง'}${qParts(b).length>1?` · ${qParts(b).length} ส่วนงาน`:''}</span>`:''}${WAITING.includes(b.status)?(b.wait?.reason?`<span class="hint wr">⏳ ${esc(b.wait.reason)}</span>`:'<span class="hint neg">⏳ ยังไม่ระบุสาเหตุที่รอ</span>'):''}${late?`<span class="pill bad">ติดตาม ${thDate(b.next)}</span>`:b.next&&BOPEN.includes(b.status)?`<span class="hint">ติดตาม ${thDate(b.next)}</span>`:''}${b.project?`<span class="pill good mono">โครงการ ${esc(b.project)}</span>`:b.status==='won'?'<span class="pill warn">รอเปิดโครงการ</span>':''}</button>`;}
 function bidForm(b){const ro=canWrite&&can('bid.edit')?'':'disabled';return `<form class="fform" id="bdForm" data-bid="${esc(b.id||'')}" style="margin:10px 0"><strong>${b.id?'แก้ไขข้อมูลการเสนองาน':'เพิ่มการเสนองาน'}</strong><div class="form-grid" style="margin-top:8px">
   <label>เลขที่<input type="text" name="no" value="${esc(b.no||'')}" required ${ro}></label><label>วันที่รับข้อมูล<input type="date" name="date" value="${esc(b.date||today())}" ${ro}></label>
   <label style="grid-column:span 2">ชื่องาน / โครงการ *<input type="text" name="name" value="${esc(b.name||'')}" required ${ro}></label>
@@ -4522,32 +4571,42 @@ function bidForm(b){const ro=canWrite&&can('bid.edit')?'':'disabled';return `<fo
   <label style="grid-column:1/-1">รายละเอียด / ขอบเขตงาน<input type="text" name="scope" value="${esc(b.scope||'')}" ${ro}></label></div>
   <div class="row" style="margin-top:8px"><button class="btn primary" ${ro}>บันทึก</button><button type="button" class="btn" data-bdformx>ยกเลิก</button></div></form>`;}
 function bidDetail(b){
-  const ro=canWrite&&can('bid.edit')?'':'disabled',t=today(),qs=b.quotes||[],acts=(b.acts||[]).slice().sort((x,y)=>String(y.date).localeCompare(String(x.date))),isOpen=BOPEN.includes(b.status);
+  const ro=canWrite&&can('bid.edit')?'':'disabled',t=today(),qs=b.quotes||[],parts=qParts(b),acts=(b.acts||[]).slice().sort((x,y)=>String(y.date).localeCompare(String(x.date))),isOpen=BOPEN.includes(b.status);
   return `<div class="card" id="bdDetail"><div class="card-head"><h2><span class="mono">${esc(b.no)}</span> · ${esc(b.name)} <span class="pill ${BST[b.status]?.[1]}">${BST[b.status]?.[0]}</span></h2><div class="row">
     ${isOpen&&!ro?`<select data-bdst aria-label="เปลี่ยนสถานะ">${BOPEN.map(s=>`<option value="${s}" ${s===b.status?'selected':''}>${BST[s][0]}</option>`).join('')}</select>`:''}
     ${isOpen&&can('bid.win')&&canWrite?`<button class="btn sm good" data-bdwin>ได้งาน</button><button class="btn sm danger" data-bdlose>ไม่ได้งาน</button>`:''}
     ${!isOpen&&!b.project&&can('bid.win')&&canWrite?'<button class="btn sm" data-bdreopen>เปิดการเสนองานอีกครั้ง</button>':''}
     ${!ro?`<button class="btn sm" data-bdedit>${bdForm===b.id?'ปิดแก้ไข':'แก้ไขข้อมูล'}</button>`:''}<button class="btn sm" data-bdclose>ปิด</button></div></div>
-  ${bdForm===b.id?bidForm(b):`<dl class="dl bdinfo"><dt>ลูกค้า</dt><dd>${esc(b.customer||'–')}${b.customerCode?` <span class="mono hint">(${esc(b.customerCode)})</span>`:''}</dd><dt>ผู้ติดต่อ</dt><dd>${esc(b.contact||'–')} ${esc(b.phone||'')}</dd><dt>สถานที่</dt><dd>${esc(b.location||'–')}</dd><dt>ประเภท · ที่มา</dt><dd>${esc(b.type||'–')} · ${esc(b.source||'–')}</dd><dt>ผู้รับผิดชอบ</dt><dd>${esc(b.sales||'–')}</dd><dt>มูลค่า</dt><dd class="num">${baht(bidVal(b))} บาท <span class="hint">(ไม่รวม VAT · รวม VAT ${baht(bidVal(b)*1.07)})</span>${b.est?` <span class="hint">ประมาณการเดิม ${baht(b.est)}</span>`:''}</dd><dt>โอกาสได้งาน</dt><dd>${b.prob??'–'}%</dd>${WAITING.includes(b.status)?`<dt>สาเหตุที่รอพิจารณา</dt><dd>${!ro?`<select data-bdwaitsel style="max-width:100%"><option value="">– ยังไม่ระบุ –</option>${WAIT_R.map(r=>`<option ${b.wait?.reason===r?'selected':''}>${r}</option>`).join('')}</select>`:esc(b.wait?.reason||'–')}${b.wait?.since?` <span class="hint">ตั้งแต่ ${thDate(b.wait.since)} · ${dayDiff(b.wait.since,today())} วัน</span>`:''}</dd>`:''}<dt>กำหนดยื่นราคา</dt><dd>${thDate(b.due)}</dd><dt>คาดว่าจะเริ่มงาน</dt><dd>${thDate(b.expStart)}${b.units?` · ประมาณ ${b.units} บาน`:''}</dd><dt>ขอบเขต</dt><dd>${esc(b.scope||'–')}</dd>
-    ${b.status==='lost'?`<dt>เหตุผลที่ไม่ได้งาน</dt><dd class="neg">${esc(b.lostReason||'')}${b.competitor?` · คู่แข่ง ${esc(b.competitor)}`:''}${b.lostNote?` · ${esc(b.lostNote)}`:''}</dd>`:''}${b.status==='won'?`<dt>ได้งานเมื่อ</dt><dd>${thDate(b.wonAt)} · ใบเสนอราคาที่ลูกค้ายอมรับ ${esc(qs.find(q=>q.status==='accepted')?.no||'–')}</dd>`:''}</dl>`}
+  ${bdForm===b.id?bidForm(b):`<dl class="dl bdinfo"><dt>ลูกค้า</dt><dd>${esc(b.customer||'–')}${b.customerCode?` <span class="mono hint">(${esc(b.customerCode)})</span>`:''}</dd><dt>ผู้ติดต่อ</dt><dd>${esc(b.contact||'–')} ${esc(b.phone||'')}</dd><dt>สถานที่</dt><dd>${esc(b.location||'–')}</dd><dt>ประเภท · ที่มา</dt><dd>${esc(b.type||'–')} · ${esc(b.source||'–')}</dd><dt>ผู้รับผิดชอบ</dt><dd>${esc(b.sales||'–')}</dd><dt>มูลค่า</dt><dd class="num">${baht(bidVal(b))} บาท <span class="hint">(ไม่รวม VAT · รวม VAT ${baht(bidInc(b))})</span>${b.est?` <span class="hint">ประมาณการเดิม ${baht(b.est)}</span>`:''}</dd><dt>โอกาสได้งาน</dt><dd>${b.prob??'–'}%</dd>${WAITING.includes(b.status)?`<dt>สาเหตุที่รอพิจารณา</dt><dd>${!ro?`<select data-bdwaitsel style="max-width:100%"><option value="">– ยังไม่ระบุ –</option>${WAIT_R.map(r=>`<option ${b.wait?.reason===r?'selected':''}>${r}</option>`).join('')}</select>`:esc(b.wait?.reason||'–')}${b.wait?.since?` <span class="hint">ตั้งแต่ ${thDate(b.wait.since)} · ${dayDiff(b.wait.since,today())} วัน</span>`:''}</dd>`:''}<dt>กำหนดยื่นราคา</dt><dd>${thDate(b.due)}</dd><dt>คาดว่าจะเริ่มงาน</dt><dd>${thDate(b.expStart)}${b.units?` · ประมาณ ${b.units} บาน`:''}</dd><dt>ขอบเขต</dt><dd>${esc(b.scope||'–')}</dd>
+    ${b.status==='lost'?`<dt>เหตุผลที่ไม่ได้งาน</dt><dd class="neg">${esc(b.lostReason||'')}${b.competitor?` · คู่แข่ง ${esc(b.competitor)}`:''}${b.lostNote?` · ${esc(b.lostNote)}`:''}</dd>`:''}${b.status==='won'?`<dt>ได้งานเมื่อ</dt><dd>${thDate(b.wonAt)} · ใบเสนอราคาที่ลูกค้ายอมรับ ${esc(qs.filter(q=>q.status==='accepted').map(q=>q.no).join(', ')||'–')}</dd>`:''}</dl>`}
   ${b.status==='won'?(b.project?`<div class="msg ok">เปิดเป็นโครงการ <strong class="mono">${esc(b.project)}</strong> แล้ว · <button class="link" data-bdgo="${esc(b.project)}">ไปที่โครงการ</button></div>`:bdOpen?openProjForm(b):`<div class="msg" style="background:var(--warn-soft)">ได้งานแล้ว พร้อมเปิดเป็นโครงการเพื่อควบคุมงานติดตั้ง ${can('proj.edit')&&canWrite?'<button class="btn sm primary" data-bdopenproj>เปิดโครงการ</button>':'<span class="hint">(ต้องมีสิทธิ์สร้างโครงการ)</span>'}</div>`):''}
   ${bdLost?`<form class="fform" id="bdLostForm"><strong>บันทึกผล: ไม่ได้งาน</strong><div class="form-grid" style="margin-top:8px"><label>เหตุผล<select name="reason">${LOST_R.map(x=>`<option>${x}</option>`).join('')}</select></label><label>คู่แข่งที่ได้งาน<input type="text" name="competitor"></label><label style="grid-column:span 2">รายละเอียด<input type="text" name="note"></label></div><div class="row" style="margin-top:8px"><button class="btn danger">บันทึก ไม่ได้งาน</button><button type="button" class="btn" data-bdlostx>ยกเลิก</button></div></form>`:''}
-  <section class="fsec"><div class="card-head"><h2>ใบเสนอราคา <span class="pill">${qs.length} ครั้ง</span></h2>${isOpen&&!ro?`<button class="btn sm primary" data-bdqt>${bdQt?'ปิด':'+ ออกใบเสนอราคา (Rev ใหม่)'}</button>`:''}</div>
+  ${bdWin?winFormHtml(b):''}
+  <section class="fsec"><div class="card-head"><h2>ใบเสนอราคา <span class="pill">${qs.length} ใบ${parts.length>1?` · ${parts.length} ส่วนงาน`:''}</span></h2>${isOpen&&!ro?(bdQt?'<button class="btn sm" data-qbx>ปิดฟอร์ม</button>':`<button class="btn sm primary" data-bdqt>${qs.length?'+ ออกใบเสนอราคาใหม่ (ส่วนงานอื่น)':'+ ออกใบเสนอราคา'}</button>`):''}</div>
+    ${qs.length&&!bdQt&&isOpen&&!ro?'<p class="hint" style="margin:0 0 8px">ปรับราคาใบเดิม กด “Rev ใหม่” ในแถวของใบนั้น (เก็บประวัติราคาเดิมไว้) · แก้ข้อมูลที่ผิดในใบเดิม กด “แก้ไข” · งานที่แยกส่วน เช่น หน้าต่างอาคาร A / ประตูอาคาร B กด “ออกใบเสนอราคาใหม่ (ส่วนงานอื่น)”</p>':''}
     ${bdQt?qbHtml(b):''}${false?`<form class="fform" id="bdQtForm"><div class="form-grid"><label>เลขที่ใบเสนอราคา<input type="text" name="no" value="${esc(nextQtNo())}" required></label><label>วันที่<input type="date" name="date" value="${t}"></label><label>มูลค่า (บาท · ไม่รวม VAT) *<input type="number" name="amount" min="0" step="any" value="${esc(bidVal(b)||'')}" required></label><label>ยืนราคาถึง<input type="date" name="valid" value="${addDays(t,30)}"></label>
       <label style="grid-column:span 2">รายละเอียดการปรับ / เงื่อนไข<input type="text" name="note" placeholder="${qs.length?'เช่น ปรับลดราคา 5% เปลี่ยนกระจกเป็น 6 มม.':'ราคาครั้งแรก'}"></label><label class="fld">ไฟล์ใบเสนอราคา (PDF)<input type="file" name="file" accept="application/pdf,image/*"></label>
       <label class="row" style="gap:6px;align-self:end"><input type="checkbox" name="send" checked>ส่งให้ลูกค้าแล้ว</label><label>ส่งทาง<select name="via"><option>อีเมล</option><option>LINE</option><option>ยื่นด้วยตนเอง</option><option>ระบบจัดซื้อของลูกค้า</option></select></label></div>
       <div class="row" style="margin-top:8px"><button class="btn primary">บันทึกใบเสนอราคา</button></div></form>`:''}
-    <div class="tablewrap"><table class="money"><thead><tr><th>Rev</th><th>เลขที่</th><th>วันที่</th><th class="r">ไม่รวม VAT</th><th class="r">รวม VAT</th><th class="r">เปลี่ยนแปลง</th><th>ยืนราคาถึง</th><th>ส่งให้ลูกค้า</th><th>เอกสาร</th><th>สถานะ</th><th></th></tr></thead><tbody>
-    ${qs.length?qs.map((q,i)=>{const prev=qs[i-1],d=prev?(Number(q.amount)-Number(prev.amount)):null,exp=q.valid&&q.valid<t&&isOpen&&i===qs.length-1;return `<tr><td>R${q.rev}</td><td class="mono">${esc(q.no)}</td><td>${thDate(q.date)}</td><td class="r num">${baht(q.amount)}</td><td class="r num">${baht(q.amount*1.07)}</td><td class="r num ${d<0?'pos':d>0?'neg':''}">${d==null?'–':(d>0?'+':'')+baht(d)+(prev.amount?` (${(d/prev.amount*100).toFixed(1)}%)`:'')}</td><td>${thDate(q.valid)}${exp?' <span class="pill bad">หมดอายุ</span>':''}</td>
+    <div class="tablewrap"><table class="money"><thead><tr><th>ส่วนงาน</th><th>Rev</th><th>เลขที่</th><th>วันที่</th><th class="r">ไม่รวม VAT</th><th class="r">รวม VAT</th><th class="r">เปลี่ยนแปลง</th><th>ยืนราคาถึง</th><th>ส่งให้ลูกค้า</th><th>เอกสาร</th><th>สถานะ</th><th></th></tr></thead><tbody>
+    ${qs.length?qs.map((q,i)=>[q,i]).sort((x,y)=>parts.indexOf(qPart(x[0]))-parts.indexOf(qPart(y[0]))||x[1]-y[1]).map(([q,i])=>{const prev=qs.slice(0,i).filter(x=>qPart(x)===qPart(q)).at(-1),sup=qSuper(qs,i),d=prev?(Number(q.amount)-Number(prev.amount)):null,exp=q.valid&&q.valid<t&&isOpen&&!sup;return `<tr><td>${prev?'<span class="hint">〃</span>':`<b>${esc(qPartLbl(q))}</b>`}</td><td>R${q.rev}</td><td class="mono">${esc(q.no)}${q.editedAt?`<span class="sub2">แก้ไข ${thDate(q.editedAt.slice(0,10))}</span>`:''}</td><td>${thDate(q.date)}</td><td class="r num">${baht(q.amount)}</td><td class="r num">${baht(qInc(q))}</td><td class="r num ${d<0?'pos':d>0?'neg':''}">${d==null?'–':(d>0?'+':'')+baht(d)+(prev.amount?` (${(d/prev.amount*100).toFixed(1)}%)`:'')}</td><td>${thDate(q.valid)}${exp?' <span class="pill bad">หมดอายุ</span>':''}</td>
       <td>${q.sentAt?`${thDate(q.sentAt)} · ${esc(q.via||'')}`:isOpen&&!ro?`<button class="btn sm" data-bdsend="${i}">ส่งแล้ว</button>`:'<span class="hint">ยังไม่ส่ง</span>'}</td><td class="row" style="flex-wrap:nowrap;gap:6px">${q.gen?`<button class="btn sm" data-bdprint="${i}">พิมพ์ F-00</button><a class="btn sm" href="${esc(mailtoQt(b,q))}" title="เปิดโปรแกรมอีเมลพร้อมข้อความ (แนบไฟล์ PDF เอง)">อีเมล</a>`:''}${q.file?`<button class="link" data-bdfile="${i}">📄</button>`:q.gen?'':'–'}</td>
-      <td>${q.status==='accepted'?'<span class="pill good">ลูกค้ายอมรับ</span>':i<qs.length-1?'<span class="pill">แทนที่แล้ว</span>':q.sentAt?'<span class="pill acc">ยื่นแล้ว</span>':'<span class="pill">ร่าง</span>'}${q.note?`<span class="sub2">${esc(q.note)}</span>`:''}</td><td></td></tr>`;}).join(''):'<tr><td colspan="11" class="empty">ยังไม่มีใบเสนอราคา</td></tr>'}
+      <td>${q.status==='accepted'?'<span class="pill good">ลูกค้ายอมรับ</span>':sup?'<span class="pill">แทนที่แล้ว</span>':q.sentAt?'<span class="pill acc">ยื่นแล้ว</span>':'<span class="pill">ร่าง</span>'}${q.note?`<span class="sub2">${esc(q.note)}</span>`:''}</td>
+      <td class="row" style="flex-wrap:nowrap;gap:6px">${!ro&&!bdQt?`<button class="btn sm" data-bdqedit="${i}" title="แก้ไขข้อมูลในใบนี้ (เลขที่และ Rev เดิม)">แก้ไข</button>${isOpen&&!sup?`<button class="btn sm" data-bdqrev="${i}" title="ออกใบใหม่ของส่วนงานนี้ ใบเดิมจะเป็น “แทนที่แล้ว”">Rev ใหม่</button>`:''}`:''}</td></tr>`;}).join(''):'<tr><td colspan="12" class="empty">ยังไม่มีใบเสนอราคา</td></tr>'}
     </tbody></table></div></section>
   <section class="fsec"><div class="card-head"><h2>บันทึกการติดตาม</h2>${!ro?`<button class="btn sm" data-bdact>${bdAct?'ปิด':'+ บันทึกการติดตาม'}</button>`:''}</div>
     ${bdAct?`<form class="fform" id="bdActForm"><div class="form-grid"><label>วันที่<input type="date" name="date" value="${t}"></label><label>ประเภท<select name="type"><option>โทรศัพท์</option><option>ประชุม / เข้าพบ</option><option>สำรวจหน้างาน</option><option>ส่งเอกสาร / ตัวอย่าง</option><option>LINE / อีเมล</option><option>อื่น ๆ</option></select></label><label style="grid-column:span 2">รายละเอียด *<input type="text" name="note" required></label><label>ติดตามครั้งถัดไป<input type="date" name="next" value="${addDays(t,7)}"></label>${WAITING.includes(b.status)?`<label style="grid-column:span 2">สาเหตุที่ยังรอพิจารณา<select name="wait"><option value="">– ไม่เปลี่ยน –</option>${WAIT_R.map(r=>`<option ${b.wait?.reason===r?'selected':''}>${r}</option>`).join('')}</select></label>`:''}<label>ปรับโอกาสได้งาน (%)<input type="number" name="prob" min="0" max="100" value="${esc(b.prob??'')}"></label></div><div class="row" style="margin-top:8px"><button class="btn primary">บันทึก</button></div></form>`:''}
     <div class="bdtl">${acts.length?acts.map(a=>`<div class="bdtli"><span class="hint">${thDate(a.date)}</span><span class="pill">${esc(a.type)}</span><span>${esc(a.note)}</span><span class="hint">${esc(a.by||'')}</span></div>`).join(''):'<div class="hint">ยังไม่มีบันทึก</div>'}</div></section></div>`;
 }
-function openProjForm(b){const nums=allProjectsRaw().map(p=>Number(String(p).replace(/\D/g,''))).filter(n=>n),code='P'+((Math.max(2600,...nums)||2600)+1),acc=(b.quotes||[]).find(q=>q.status==='accepted')||bidQt(b);
-  return `<form class="fform" id="bdProjForm"><strong>เปิดโครงการจากการเสนองาน</strong><p class="hint" style="margin:4px 0 8px">ระบบสร้างโครงการพร้อมข้อมูลลูกค้า มูลค่า และใบเสนอราคา ${esc(acc?.no||'')} ให้ จากนั้นไปกรอกข้อมูลที่เหลือในแท็บ “ข้อมูลโครงการ” และนำเข้า SO</p><div class="form-grid">
+/* ได้งาน: มีหลายส่วนงานให้เลือกว่าลูกค้ายอมรับส่วนไหน */
+function winFormHtml(b){const qs=b.quotes||[],cur=qCur(b);
+  return `<form class="fform" id="bdWinForm"><strong>บันทึกผล: ได้งาน · เลือกใบเสนอราคาที่ลูกค้ายอมรับ</strong><div style="margin:8px 0;display:grid;gap:6px">${cur.map(q=>`<label class="row" style="gap:8px"><input type="checkbox" name="q" value="${qs.indexOf(q)}" checked><b>${esc(qPartLbl(q))}</b> <span class="mono">${esc(q.no)} R${q.rev}</span> <span class="num">${baht(q.amount)} บาท</span> <span class="hint">(ไม่รวม VAT)</span></label>`).join('')}</div>
+    <div class="row"><button class="btn good">บันทึก ได้งาน</button><button type="button" class="btn" data-bdwinx>ยกเลิก</button></div></form>`;}
+async function doWin(sel,idx){const qs=sel.quotes||[],nq=qs.map((q,i)=>idx.includes(i)?{...q,status:'accepted'}:q),nos=idx.map(i=>qs[i].no).join(', ');
+  const ok=await bidPatch(sel,{wait:null,status:'won',wonAt:today(),prob:100,quotes:nq,acts:[...(sel.acts||[]),{date:today(),type:'อื่น ๆ',note:`ได้งาน · ลูกค้ายอมรับใบเสนอราคา ${nos}`,by:actBy()}]},'บันทึกได้งานแล้ว · เปิดโครงการได้เลย');
+  if(ok){bdWin=false;bdOpen=can('proj.edit');}renderBid();}
+function openProjForm(b){const nums=allProjectsRaw().map(p=>Number(String(p).replace(/\D/g,''))).filter(n=>n),code='P'+((Math.max(2600,...nums)||2600)+1),acc=qCur(b);
+  return `<form class="fform" id="bdProjForm"><strong>เปิดโครงการจากการเสนองาน</strong><p class="hint" style="margin:4px 0 8px">ระบบสร้างโครงการพร้อมข้อมูลลูกค้า มูลค่ารวม ${baht(bidVal(b))} บาท และใบเสนอราคา ${esc(acc.map(q=>q.no).join(', '))} ให้ จากนั้นไปกรอกข้อมูลที่เหลือในแท็บ “ข้อมูลโครงการ” และนำเข้า SO</p><div class="form-grid">
   <label>รหัสโครงการ *<input type="text" name="code" value="${esc(code)}" required></label><label style="grid-column:span 2">ชื่อโครงการ *<input type="text" name="name" value="${esc(b.name)}" required></label>
   <label>ลูกค้า<input type="text" name="customer" value="${esc(b.customer||'')}"></label><label>รหัสลูกค้า<input type="text" name="customerCode" value="${esc(b.customerCode||'')}"></label>
   <label>เริ่มงาน<input type="date" name="start" value="${esc(b.expStart||addDays(today(),14))}"></label><label>สิ้นสุด<input type="date" name="end" value="${esc(addDays(b.expStart||addDays(today(),14),120))}"></label></div>
@@ -4560,15 +4619,18 @@ const actBy=()=>curUser()?.name||'';
     if(b=g('[data-bdy]')){bdYear=b.dataset.bdy;renderBid();return;}
     if(b=g('[data-bdnew]')){bdForm=bdForm==='new'?null:'new';renderBid();return;}
     if(b=g('[data-bdformx]')){bdForm=null;renderBid();return;}
-    if(b=g('[data-bdopen]')){bdSel=bdSel===b.dataset.bdopen?null:b.dataset.bdopen;bdQt=bdAct=bdOpen=bdLost=false;if(bdForm!=='new')bdForm=null;renderBid();if(bdSel)$('bdDetail')?.scrollIntoView({behavior:'smooth',block:'start'});return;}
+    if(b=g('[data-bdopen]')){bdSel=bdSel===b.dataset.bdopen?null:b.dataset.bdopen;bdQt=bdAct=bdOpen=bdLost=bdWin=false;if(bdForm!=='new')bdForm=null;renderBid();if(bdSel)$('bdDetail')?.scrollIntoView({behavior:'smooth',block:'start'});return;}
     if(b=g('[data-bdclose]')){bdSel=null;renderBid();return;}
     if(!sel)return;
     if(b=g('[data-bdedit]')){bdForm=bdForm===sel.id?null:sel.id;renderBid();return;}
-    if(b=g('[data-bdqt]')){bdQt=bdQt?false:newQtDraft(sel);renderBid();return;}
-    if(b=g('[data-qbmode]')){if(bdQt.mode==='build')qbRead();bdQt.mode=b.dataset.qbmode;renderBid();return;}
+    if(b=g('[data-bdqt]')){bdQt=bdQt?false:newQtDraft(sel,{newPart:(sel.quotes||[]).length>0});renderBid();$('qbForm')?.scrollIntoView({behavior:'smooth',block:'start'});return;}
+    if(b=g('[data-bdqrev]')){const q=(sel.quotes||[])[Number(b.dataset.bdqrev)];if(q){bdQt=newQtDraft(sel,{part:qPart(q)});renderBid();($('qbForm')||$('bdQtForm'))?.scrollIntoView({behavior:'smooth',block:'start'});}return;}
+    if(b=g('[data-bdqedit]')){const i=Number(b.dataset.bdqedit),q=(sel.quotes||[])[i];if(q){bdQt=editQtDraft(sel,i);renderBid();($('qbForm')||$('bdQtForm'))?.scrollIntoView({behavior:'smooth',block:'start'});}return;}
+    if(b=g('[data-bdwinx]')){bdWin=false;renderBid();return;}
+    if(b=g('[data-qbmode]')){if(bdQt.edit!=null)return;if(bdQt.mode==='build')qbRead();bdQt.mode=b.dataset.qbmode;renderBid();return;}
     if(b=g('[data-qadd]')){qbRead();const c=b.dataset.qadd;bdQt.items.push({cat:c,code:'',desc:c==='inst'?'ค่าติดตั้ง':c==='dlv'?'ค่าขนส่ง':'',size:'',qty:1,unit:c==='dlv'?'เที่ยว':'ชุด',price:0});renderBid();return;}
     if(b=g('[data-qdel]')){qbRead();bdQt.items.splice(Number(b.dataset.qdel),1);renderBid();return;}
-    if(b=g('[data-qcopy]')){qbRead();const last=(sel.quotes||[]).slice().reverse().find(q=>q.items?.length);if(last){bdQt.items=last.items.map(x=>({...x}));bdQt.disc=last.disc||0;bdQt.discPct=last.discPct||0;bdQt.terms={...last.terms};}renderBid();return;}
+    if(b=g('[data-qcopy]')){qbRead();const last=qOfPart(sel,bdQt.part||'').reverse().find(q=>q.items?.length)||(sel.quotes||[]).slice().reverse().find(q=>q.items?.length);if(last){bdQt.items=last.items.map(x=>({...x}));bdQt.disc=last.disc||0;bdQt.discPct=last.discPct||0;bdQt.terms={...last.terms};}renderBid();return;}
     if(b=g('[data-qbx]')){bdQt=false;renderBid();return;}
     if(b=g('[data-bdprint]')){const q=(sel.quotes||[])[Number(b.dataset.bdprint)];if(q){fmProj='';openPrint('F-00',false,sel.id+'|'+q.no);}return;}
     if(b=g('[data-bdwait]')){return;}
@@ -4580,8 +4642,9 @@ const actBy=()=>curUser()?.name||'';
     if(b=g('[data-bdgo]')){goProject(b.dataset.bdgo,{tab:'setup'});return;}
     if(b=g('[data-bdfile]')){const q=(sel.quotes||[])[Number(b.dataset.bdfile)];if(q?.file)openFile(q.file);return;}
     if(b=g('[data-bdsend]')){if(!needPerm('bid.edit'))return;const i=Number(b.dataset.bdsend),qs=(sel.quotes||[]).map((q,j)=>j===i?{...q,sentAt:today(),via:q.via||'อีเมล'}:q);await bidPatch(sel,{quotes:qs,status:['lead','survey','quoting'].includes(sel.status)?'submitted':sel.status,acts:[...(sel.acts||[]),{date:today(),type:'ส่งเอกสาร / ตัวอย่าง',note:`ส่งใบเสนอราคา ${qs[i].no}`,by:actBy()}]},'บันทึกการส่งใบเสนอราคาแล้ว');renderBid();return;}
-    if(b=g('[data-bdwin]')){if(!needPerm('bid.win'))return;const qs=sel.quotes||[];if(!qs.length){toast('ต้องมีใบเสนอราคาอย่างน้อย 1 ครั้งก่อนบันทึกได้งาน');return;}
-      const nq=qs.map((q,i)=>i===qs.length-1?{...q,status:'accepted'}:q);await bidPatch(sel,{wait:null,status:'won',wonAt:today(),prob:100,quotes:nq,acts:[...(sel.acts||[]),{date:today(),type:'อื่น ๆ',note:`ได้งาน · ลูกค้ายอมรับใบเสนอราคา ${nq.at(-1).no}`,by:actBy()}]},'บันทึกได้งานแล้ว · เปิดโครงการได้เลย');bdOpen=can('proj.edit');renderBid();return;}
+    if(b=g('[data-bdwin]')){if(!needPerm('bid.win'))return;const qs=sel.quotes||[];if(!qs.length){toast('ต้องมีใบเสนอราคาอย่างน้อย 1 ใบก่อนบันทึกได้งาน');return;}
+      const cur=qCur(sel);if(cur.length>1){bdWin=true;bdLost=false;renderBid();$('bdWinForm')?.scrollIntoView({behavior:'smooth',block:'center'});return;}
+      await doWin(sel,[qs.indexOf(cur[0])]);return;}
     if(b=g('[data-bdreopen]')){if(!needPerm('bid.win'))return;await bidPatch(sel,{status:'negotiate',wonAt:null,lostReason:null,quotes:(sel.quotes||[]).map(q=>({...q,status:q.status==='accepted'?'sent':q.status}))},'เปิดการเสนองานอีกครั้งแล้ว');renderBid();}});
   el.addEventListener('change',async e=>{const t=e.target;const sel=bdSel&&state.bids.find(x=>x.id===bdSel);
     if(t.id==='bdSales'){bdSales=t.value;renderBid();}
@@ -4596,15 +4659,23 @@ const actBy=()=>curUser()?.name||'';
       else{let id=null;if(await write(async()=>{const r=await db.collection('bids').add({...body,status:'lead',quotes:[],acts:[{date:today(),type:'อื่น ๆ',note:'รับข้อมูลโอกาสงาน',by:actBy()}]});id=r.id;},'เพิ่มการเสนองานแล้ว')){bdForm=null;bdSel=id;}}
       renderBid();return;}
     if(!sel)return;
+    if(f.id==='bdWinForm'){if(!needPerm('bid.win'))return;const idx=[...f.querySelectorAll('[name=q]:checked')].map(x=>Number(x.value));if(!idx.length){toast('เลือกใบเสนอราคาที่ลูกค้ายอมรับอย่างน้อย 1 ใบ');return;}await doWin(sel,idx);return;}
     if(f.id==='bdQtForm'){if(!needPerm('bid.edit'))return;const file=f.querySelector('[name=file]').files[0],amt=toNum(d.amount)||0;if(amt<=0){toast('ใส่มูลค่า');return;}
-      const ok=await write(async()=>{let fl=null;if(file)fl=await storeFile(file,'bid');const qs=sel.quotes||[],q={rev:qs.length,no:d.no.trim(),date:d.date||today(),amount:amt,valid:d.valid||'',note:d.note.trim(),file:fl,...(d.send?{sentAt:d.date||today(),via:d.via}:{}),status:d.send?'sent':'draft'};
+      const part=qtPartCheck(sel,d.part);if(part==null)return;
+      if(bdQt.edit!=null){const i=bdQt.edit,qs0=sel.quotes||[],old=qs0[i];if(!old)return;if(qs0.some((x,j)=>j!==i&&x.no===d.no.trim())){toast('เลขที่ใบเสนอราคาซ้ำ');return;}
+        const ok=await write(async()=>{let fl=old.file||null;if(file)fl=await storeFile(file,'bid');const q={...old,no:d.no.trim(),date:d.date||old.date,amount:amt,valid:d.valid||'',note:d.note.trim(),file:fl,editedAt:new Date().toISOString()};
+          await db.doc('bids/'+sel.id).update({quotes:qtRename(qs0,qPart(old),part).map((x,j)=>j===i?{...q,part}:x),acts:[...(sel.acts||[]),{date:today(),type:'อื่น ๆ',note:`แก้ไขใบเสนอราคา ${q.no} R${q.rev} มูลค่า ${baht(amt)} บาท${amt!==Number(old.amount)?` (เดิม ${baht(old.amount)})`:''}`,by:actBy()}],...stamp()});},'บันทึกการแก้ไขใบเสนอราคาแล้ว');
+        if(ok)bdQt=false;renderBid();return;}
+      const ok=await write(async()=>{let fl=null;if(file)fl=await storeFile(file,'bid');const qs=sel.quotes||[],q={rev:qOfPart(sel,part).length,part,no:d.no.trim(),date:d.date||today(),amount:amt,valid:d.valid||'',note:d.note.trim(),file:fl,...(d.send?{sentAt:d.date||today(),via:d.via}:{}),status:d.send?'sent':'draft'};
         await db.doc('bids/'+sel.id).update({quotes:[...qs,q],status:d.send&&['lead','survey','quoting'].includes(sel.status)?'submitted':['lead','survey'].includes(sel.status)?'quoting':sel.status,acts:[...(sel.acts||[]),{date:q.date,type:'ส่งเอกสาร / ตัวอย่าง',note:`${d.send?'ส่ง':'จัดทำ'}ใบเสนอราคา ${q.no} R${q.rev} มูลค่า ${baht(amt)} บาท${q.note?' · '+q.note:''}`,by:actBy()}],next:sel.next&&sel.next>today()?sel.next:addDays(today(),7),...stamp()});},'บันทึกใบเสนอราคาแล้ว');
       if(ok)bdQt=false;renderBid();return;}
     if(f.id==='bdActForm'){if(!needPerm('bid.edit'))return;if(!d.note.trim())return;const nw=d.wait&&d.wait!==sel.wait?.reason?{wait:{reason:d.wait,since:d.date||today()}}:{};if(await bidPatch(sel,{...nw,acts:[...(sel.acts||[]),{date:d.date||today(),type:d.type,note:d.note.trim()+(nw.wait?` · สาเหตุที่รอ: ${d.wait}`:''),wait:d.wait||'',by:actBy()}],next:d.next||'',...(d.prob!==''?{prob:toNum(d.prob)}:{})},'บันทึกการติดตามแล้ว'))bdAct=false;renderBid();return;}
     if(f.id==='bdLostForm'){if(!needPerm('bid.win'))return;if(await bidPatch(sel,{wait:null,status:'lost',lostReason:d.reason,competitor:d.competitor.trim(),lostNote:d.note.trim(),prob:0,acts:[...(sel.acts||[]),{date:today(),type:'อื่น ๆ',note:`ไม่ได้งาน · ${d.reason}${d.competitor?' · คู่แข่ง '+d.competitor:''}`,by:actBy()}]},'บันทึกผลไม่ได้งานแล้ว'))bdLost=false;renderBid();return;}
     if(f.id==='bdProjForm'){if(!needPerm('proj.edit'))return;const code=d.code.trim().toUpperCase();if(!code){toast('ใส่รหัสโครงการ');return;}if(state.projects[code]||allProjectsRaw().includes(code)){toast(`มีโครงการ ${code} แล้ว`);return;}
-      const acc=(sel.quotes||[]).find(q=>q.status==='accepted')||bidQt(sel),val=Number(acc?.amount)||bidVal(sel);
-      const pj={code,name:d.name.trim(),customer:d.customer.trim(),customerCode:d.customerCode.trim(),start:d.start||'',end:d.end||'',bid:sel.id,valueMode:'turnkey',valueBasis:'ex',value:val,valueEx:{goods:val,inst:0,dlv:0},quotes:(sel.quotes||[]).filter(q=>q.status==='accepted').map((q,i)=>({id:'q'+code+i,no:q.no,date:q.date,amount:q.amount,signer:sel.contact||sel.customer,file:q.file||null})),createdAt:new Date().toISOString(),...stamp()};
+      const acc=qCur(sel),val=bidVal(sel);
+      /* รวมทุกใบที่ลูกค้ายอมรับ · แยกค่าขนส่ง (ไม่มี VAT) ออกจากค่าสินค้าพร้อมติดตั้ง ตามรายการในใบเสนอราคา */
+      const vex={goods:0,inst:0,dlv:0};acc.forEach(q=>{if(q.items?.length){const c=qtCalc(q);vex.goods+=c.net;vex.dlv+=c.dlv;}else vex.goods+=Number(q.amount)||0;});vex.goods=moneyR2(vex.goods);vex.dlv=moneyR2(vex.dlv);
+      const pj={code,name:d.name.trim(),customer:d.customer.trim(),customerCode:d.customerCode.trim(),start:d.start||'',end:d.end||'',bid:sel.id,valueMode:'turnkey',valueBasis:'ex',value:val,valueIn:{...vex},valueEx:vex,quotes:acc.map((q,i)=>({id:'q'+code+i,no:q.no,date:q.date,amount:q.amount,part:qPart(q),signer:sel.contact||sel.customer,file:q.file||null})),createdAt:new Date().toISOString(),...stamp()};
       const ok=await write(async()=>{await db.doc('projects/'+code).set(pj);await db.doc('bids/'+sel.id).update({project:code,acts:[...(sel.acts||[]),{date:today(),type:'อื่น ๆ',note:`เปิดโครงการ ${code}`,by:actBy()}],...stamp()});},`เปิดโครงการ ${code} แล้ว · กรอกข้อมูลที่เหลือในแท็บข้อมูลโครงการ`);
       if(ok){bdOpen=false;state.projects={...state.projects,[code]:pj};if(actAs===''&&curUser()&&Array.isArray(curUser().projects)){}goProject(code,{tab:'setup'});}return;}});
 })();
@@ -4618,16 +4689,38 @@ function bahtText(n){n=Math.round((Number(n)||0)*100)/100;const D=['','หนึ
   const rd=s=>{let o='';const L=s.length;for(let i=0;i<L;i++){const d=+s[i],p=L-i-1;if(!d)continue;if(p===0&&d===1&&L>1)o+='เอ็ด';else if(p===1&&d===2)o+='ยี่';else if(!(p===1&&d===1))o+=D[d];o+=P[p];}return o;};
   const big=s=>{if(s.length>6)return big(s.slice(0,-6))+'ล้าน'+rd(s.slice(-6).replace(/^0+/,''));return rd(s.replace(/^0+/,''));};
   const [b,st]=n.toFixed(2).split('.');const bt=Number(b)?big(b)+'บาท':'';return (bt||'ศูนย์บาท')+(Number(st)?rd(st.replace(/^0/,''))+'สตางค์':'ถ้วน');}
-function newQtDraft(b){const prev=bidQt(b),last=(b.quotes||[]).slice().reverse().find(q=>q.items?.length);
-  return{mode:'build',no:nextQtNo(),date:today(),validDays:30,attn:prev?.attn||b.contact||'',ref:b.name,items:last?last.items.map(x=>({...x})):[{cat:'goods',code:'',desc:'หน้าต่าง uPVC บานเลื่อน กระจกเขียวตัดแสง 6 มม. พร้อมมุ้ง',size:'1200×1400',qty:b.units||1,unit:'ชุด',price:0},{cat:'inst',code:'',desc:'ค่าติดตั้งพร้อมยาแนวซิลิโคน',size:'',qty:b.units||1,unit:'ชุด',price:0},{cat:'dlv',code:'',desc:'ค่าขนส่งถึงหน้างาน',size:'',qty:1,unit:'เที่ยว',price:0}],
-    disc:last?.disc||0,discPct:last?.discPct||0,terms:{...QT_TERMS,...(last?.terms||{})},signer:prev?.signer||b.sales||curUser()?.name||'',signerPos:prev?.signerPos||'ฝ่ายขาย',note:''};}
-function qbHtml(b){const q=bdQt,c=qtCalc(q),ro=canWrite&&can('bid.edit')?'':'disabled';
-  if(q.mode==='file')return `<form class="fform" id="bdQtForm"><div class="row" style="justify-content:space-between"><strong>แนบใบเสนอราคาที่ทำจากระบบอื่น</strong><button type="button" class="btn sm" data-qbmode="build">สร้างใบเสนอราคาในระบบแทน</button></div><div class="form-grid" style="margin-top:8px"><label>เลขที่ใบเสนอราคา<input type="text" name="no" value="${esc(q.no)}" required></label><label>วันที่<input type="date" name="date" value="${esc(q.date)}"></label><label>มูลค่า (บาท · ไม่รวม VAT) *<input type="number" name="amount" min="0" step="any" value="${esc(bidVal(b)||'')}" required></label><label>ยืนราคาถึง<input type="date" name="valid" value="${addDays(q.date,30)}"></label>
-      <label style="grid-column:span 2">รายละเอียดการปรับ / เงื่อนไข<input type="text" name="note"></label><label class="fld">ไฟล์ใบเสนอราคา (PDF)<input type="file" name="file" accept="application/pdf,image/*"></label>
-      <label class="row" style="gap:6px;align-self:end"><input type="checkbox" name="send" checked>ส่งให้ลูกค้าแล้ว</label><label>ส่งทาง<select name="via"><option>อีเมล</option><option>LINE</option><option>ยื่นด้วยตนเอง</option><option>ระบบจัดซื้อของลูกค้า</option></select></label></div>
-      <div class="row" style="margin-top:8px"><button class="btn primary">บันทึกใบเสนอราคา</button></div></form>`;
-  return `<form class="fform qb" id="qbForm"><div class="row" style="justify-content:space-between"><strong>ออกใบเสนอราคา Rev ${(b.quotes||[]).length} · ${esc(b.customer||'')}</strong><button type="button" class="btn sm" data-qbmode="file">แนบไฟล์จากระบบอื่นแทน</button></div>
-    <div class="form-grid" style="margin-top:8px"><label>เลขที่<input type="text" name="no" value="${esc(q.no)}" required ${ro}></label><label>วันที่<input type="date" name="date" value="${esc(q.date)}" ${ro}></label><label>ยืนราคา (วัน)<input type="number" name="validDays" value="${esc(q.validDays)}" min="1" ${ro}></label><label>เรียน (ผู้ติดต่อ)<input type="text" name="attn" value="${esc(q.attn)}" ${ro}></label><label style="grid-column:span 2">อ้างอิง / ชื่อโครงการ<input type="text" name="ref" value="${esc(q.ref)}" ${ro}></label></div>
+/* o.part = ออก Rev ใหม่ของส่วนงานนั้น · o.newPart = เปิดส่วนงานใหม่ (ใบแรกของส่วนงาน) */
+function newQtDraft(b,o={}){const part=o.newPart?'':String(o.part||''),pq=o.newPart?[]:qOfPart(b,part),prev=pq.at(-1)||bidQt(b),last=pq.slice().reverse().find(q=>q.items?.length),tl=last||(b.quotes||[]).slice().reverse().find(q=>q.terms);
+  return{mode:'build',newPart:!!o.newPart,part,amount:pq.length?Number(pq.at(-1).amount)||'':o.newPart?'':bidVal(b)||'',no:nextQtNo(),date:today(),validDays:30,attn:prev?.attn||b.contact||'',ref:b.name,items:last?last.items.map(x=>({...x})):[{cat:'goods',code:'',desc:'หน้าต่าง uPVC บานเลื่อน กระจกเขียวตัดแสง 6 มม. พร้อมมุ้ง',size:'1200×1400',qty:b.units||1,unit:'ชุด',price:0},{cat:'inst',code:'',desc:'ค่าติดตั้งพร้อมยาแนวซิลิโคน',size:'',qty:b.units||1,unit:'ชุด',price:0},{cat:'dlv',code:'',desc:'ค่าขนส่งถึงหน้างาน',size:'',qty:1,unit:'เที่ยว',price:0}],
+    disc:last?.disc||0,discPct:last?.discPct||0,terms:{...QT_TERMS,...(tl?.terms||{})},signer:prev?.signer||b.sales||curUser()?.name||'',signerPos:prev?.signerPos||'ฝ่ายขาย',note:''};}
+/* แก้ไขใบเดิม: เลขที่ · Rev · สถานะ · วันที่ส่ง คงเดิม */
+function editQtDraft(b,i){const q=(b.quotes||[])[i];
+  if(!q.gen)return{mode:'file',edit:i,part:qPart(q),no:q.no,date:q.date||today(),amount:q.amount,valid:q.valid||'',note:q.note||''};
+  const items=(q.items||[]).map(x=>({...x}));if(!items.length)items.push({cat:'goods',code:'',desc:'',size:'',qty:1,unit:'ชุด',price:0});
+  return{mode:'build',edit:i,part:qPart(q),no:q.no,date:q.date||today(),validDays:q.valid&&q.date?Math.max(1,dayDiff(q.date,q.valid)):30,attn:q.attn||'',ref:q.ref||'',items,disc:q.disc||0,discPct:q.discPct||0,terms:{...QT_TERMS,...(q.terms||{})},signer:q.signer||'',signerPos:q.signerPos||'',note:q.note||''};}
+function qtPartCheck(b,raw){const p=String(raw||'').trim(),q=bdQt,parts=qParts(b);
+  if(q.edit!=null){const from=qPart((b.quotes||[])[q.edit]);if(p!==from&&parts.includes(p)){toast('มีส่วนงานชื่อนี้แล้ว');return null;}return p;}
+  if(q.newPart){if(!p){toast('ตั้งชื่อส่วนงาน เช่น หน้าต่าง อาคาร A');return null;}if(parts.includes(p)){toast('มีส่วนงานนี้แล้ว · ถ้าจะปรับราคา กด “Rev ใหม่” ในแถวของส่วนงานนั้น');return null;}return p;}
+  return (b.quotes||[]).length?String(q.part||''):p;}
+/* เปลี่ยนชื่อส่วนงาน = เปลี่ยนทุก Rev ของส่วนงานนั้น */
+const qtRename=(qs,from,to)=>from===to?qs:qs.map(x=>qPart(x)===from?{...x,part:to}:x);
+function qtHead(b){const q=bdQt,qs=b.quotes||[];
+  if(q.edit!=null){const o=qs[q.edit]||{};return `แก้ไขใบเสนอราคา ${esc(o.no||'')} R${o.rev??''}${qPart(o)?' · '+esc(qPart(o)):''}`;}
+  if(q.newPart)return 'ออกใบเสนอราคาใหม่ · ส่วนงานใหม่ Rev 0';
+  return qs.length?`ออก Rev ใหม่ · ${esc(qPartLbl(q))} Rev ${qOfPart(b,q.part||'').length}`:'ออกใบเสนอราคา Rev 0';}
+function qtPartFld(b){const q=bdQt,qs=b.quotes||[],ro=canWrite&&can('bid.edit')?'':'disabled';
+  if(q.edit==null&&!q.newPart&&qs.length)return `<input type="hidden" name="part" value="${esc(q.part||'')}"><label>ส่วนงาน<input type="text" value="${esc(qPartLbl(q))}" disabled></label>`;
+  return `<label style="grid-column:span 2">ส่วนงาน${q.newPart?' *':''}<input type="text" name="part" value="${esc(q.part||'')}" placeholder="${q.newPart?'เช่น หน้าต่าง อาคาร A / ประตู อาคาร B':'เว้นว่างได้ ถ้ามีส่วนงานเดียว'}" ${q.newPart?'required':''} ${ro}>${q.edit!=null&&qOfPart(b,q.part||'').length>1?'<span class="hint">เปลี่ยนชื่อจะเปลี่ยนทุก Rev ของส่วนงานนี้</span>':''}${q.newPart&&qParts(b).includes('')?'<span class="hint">ใบเดิมจะแสดงเป็น “ส่วนงานหลัก” · ตั้งชื่อให้ได้ด้วยปุ่ม “แก้ไข”</span>':''}</label>`;}
+function qtEditWarn(b){const q=bdQt;if(q.edit==null)return '';const o=(b.quotes||[])[q.edit]||{};
+  return (o.sentAt?'<div class="msg" style="background:var(--warn-soft);margin-top:8px">ใบนี้ส่งให้ลูกค้าแล้ว · ถ้าเป็นการปรับราคาหรือเงื่อนไขกับลูกค้า ควรใช้ “Rev ใหม่” แทน เพื่อเก็บประวัติราคาเดิม · ใช้ “แก้ไข” เมื่อแก้ข้อมูลที่พิมพ์ผิด</div>':'')+
+    (o.status==='accepted'&&b.project?`<div class="msg err" style="margin-top:8px">โครงการ ${esc(b.project)} เปิดแล้ว · มูลค่าและเลขที่ในโครงการจะไม่เปลี่ยนตาม ต้องแก้ในแท็บข้อมูลโครงการด้วย</div>`:'');}
+function qbHtml(b){const q=bdQt,c=qtCalc(q),ro=canWrite&&can('bid.edit')?'':'disabled',ed=q.edit!=null;
+  if(q.mode==='file')return `<form class="fform" id="bdQtForm"><div class="row" style="justify-content:space-between"><strong>${ed?qtHead(b):'แนบใบเสนอราคาที่ทำจากระบบอื่น · '+qtHead(b).replace('ออก','')}</strong>${ed?'':'<button type="button" class="btn sm" data-qbmode="build">สร้างใบเสนอราคาในระบบแทน</button>'}</div>${qtEditWarn(b)}<div class="form-grid" style="margin-top:8px">${qtPartFld(b)}<label>เลขที่ใบเสนอราคา<input type="text" name="no" value="${esc(q.no)}" required></label><label>วันที่<input type="date" name="date" value="${esc(q.date)}"></label><label>มูลค่า (บาท · ไม่รวม VAT) *<input type="number" name="amount" min="0" step="any" value="${esc(q.amount??'')}" required></label><label>ยืนราคาถึง<input type="date" name="valid" value="${esc(q.valid??addDays(q.date,30))}"></label>
+      <label style="grid-column:span 2">รายละเอียดการปรับ / เงื่อนไข<input type="text" name="note" value="${esc(q.note||'')}"></label><label class="fld">${ed?'เปลี่ยนไฟล์ (ไม่เลือก = ใช้ไฟล์เดิม)':'ไฟล์ใบเสนอราคา (PDF)'}<input type="file" name="file" accept="application/pdf,image/*"></label>
+      ${ed?'':'<label class="row" style="gap:6px;align-self:end"><input type="checkbox" name="send" checked>ส่งให้ลูกค้าแล้ว</label><label>ส่งทาง<select name="via"><option>อีเมล</option><option>LINE</option><option>ยื่นด้วยตนเอง</option><option>ระบบจัดซื้อของลูกค้า</option></select></label>'}</div>
+      <div class="row" style="margin-top:8px"><button class="btn primary">${ed?'บันทึกการแก้ไข':'บันทึกใบเสนอราคา'}</button><button type="button" class="btn" data-qbx>ยกเลิก</button></div></form>`;
+  return `<form class="fform qb" id="qbForm"><div class="row" style="justify-content:space-between"><strong>${qtHead(b)} · ${esc(b.customer||'')}</strong>${ed?'':'<button type="button" class="btn sm" data-qbmode="file">แนบไฟล์จากระบบอื่นแทน</button>'}</div>${qtEditWarn(b)}
+    <div class="form-grid" style="margin-top:8px">${qtPartFld(b)}<label>เลขที่<input type="text" name="no" value="${esc(q.no)}" required ${ro}></label><label>วันที่<input type="date" name="date" value="${esc(q.date)}" ${ro}></label><label>ยืนราคา (วัน)<input type="number" name="validDays" value="${esc(q.validDays)}" min="1" ${ro}></label><label>เรียน (ผู้ติดต่อ)<input type="text" name="attn" value="${esc(q.attn)}" ${ro}></label><label style="grid-column:span 2">อ้างอิง / ชื่อโครงการ<input type="text" name="ref" value="${esc(q.ref)}" ${ro}></label></div>
     <div class="tablewrap" style="margin-top:8px"><table class="money qbt"><thead><tr><th>#</th><th>ประเภท</th><th>รหัส / ชื่อตามแบบ</th><th>รายละเอียด</th><th>ขนาด (mm)</th><th class="r">จำนวน</th><th>หน่วย</th><th class="r">ราคา/หน่วย</th><th class="r">จำนวนเงิน</th><th></th></tr></thead><tbody>
     ${q.items.map((it,i)=>`<tr data-qi="${i}"><td>${i+1}</td><td><select data-qf="cat" ${ro}>${Object.entries(QCAT).map(([k,l])=>`<option value="${k}" ${it.cat===k?'selected':''}>${l}</option>`).join('')}</select></td><td><input type="text" data-qf="code" value="${esc(it.code)}" style="width:90px" ${ro}></td><td><input type="text" data-qf="desc" value="${esc(it.desc)}" style="min-width:220px" ${ro}></td><td><input type="text" data-qf="size" value="${esc(it.size)}" style="width:90px" ${ro}></td><td><input type="number" data-qf="qty" value="${esc(it.qty)}" min="0" step="any" style="width:70px;text-align:right" ${ro}></td><td><input type="text" data-qf="unit" value="${esc(it.unit)}" style="width:60px" ${ro}></td><td><input type="number" data-qf="price" value="${esc(it.price)}" min="0" step="any" style="width:100px;text-align:right" ${ro}></td><td class="r num" data-qamt>${baht(qline(it))}</td><td><button type="button" class="btn sm" data-qdel="${i}" ${q.items.length>1?'':'disabled'}>ลบ</button></td></tr>`).join('')}
     </tbody></table></div>
@@ -4637,18 +4730,25 @@ function qbHtml(b){const q=bdQt,c=qtCalc(q),ro=canWrite&&can('bid.edit')?'':'dis
       <label style="grid-column:1/-1">การรับประกัน<textarea name="t_warranty" rows="2" ${ro}>${esc(q.terms.warranty)}</textarea></label><label style="grid-column:1/-1">หมายเหตุ / เงื่อนไขอื่น<textarea name="t_note" rows="2" ${ro}>${esc(q.terms.note)}</textarea></label>
       <label>ผู้เสนอราคา<input type="text" name="signer" value="${esc(q.signer)}" ${ro}></label><label>ตำแหน่ง<input type="text" name="signerPos" value="${esc(q.signerPos)}" ${ro}></label><label style="grid-column:1/-1">สรุปการเปลี่ยนแปลงจากครั้งก่อน (ภายใน)<input type="text" name="note" value="${esc(q.note||'')}" placeholder="${(b.quotes||[]).length?'เช่น ลดราคา 5% ตามที่ลูกค้าต่อรอง':'ราคาครั้งแรก'}" ${ro}></label></div>
     <table class="money qbtot" id="qbTot">${qbTotRows(c)}</table></div>
-    <div class="row" style="margin-top:10px"><button class="btn primary" data-qsave="print" ${ro}>บันทึกและพิมพ์ใบเสนอราคา</button><button class="btn" data-qsave="draft" ${ro}>บันทึกร่าง</button><button type="button" class="btn" data-qbx>ยกเลิก</button></div></form>`;}
+    <div class="row" style="margin-top:10px"><button class="btn primary" data-qsave="print" ${ro}>${ed?'บันทึกการแก้ไขและพิมพ์':'บันทึกและพิมพ์ใบเสนอราคา'}</button><button class="btn" data-qsave="draft" ${ro}>${ed?'บันทึกการแก้ไข':'บันทึกร่าง'}</button><button type="button" class="btn" data-qbx>ยกเลิก</button></div></form>`;}
 const qbTotRows=c=>`<tr><td>รวมค่าสินค้าและค่าติดตั้ง</td><td class="r num">${baht(c.goods)}</td></tr><tr><td>ส่วนลด</td><td class="r num">${c.disc?'−'+baht(c.disc):'–'}</td></tr><tr><td>ยอดหลังหักส่วนลด</td><td class="r num">${baht(c.net)}</td></tr><tr><td>ภาษีมูลค่าเพิ่ม 7%</td><td class="r num">${baht(c.vat)}</td></tr><tr><td>ค่าขนส่ง (ไม่มี VAT)</td><td class="r num">${baht(c.dlv)}</td></tr><tr class="tot"><td>รวมทั้งสิ้น</td><td class="r num">${baht(c.total)}</td></tr><tr><td colspan="2" class="hint" style="text-align:right">(${bahtText(c.total)})</td></tr>`;
 function qbRead(){const f=$('qbForm');if(!f||!bdQt)return;const d=Object.fromEntries(new FormData(f).entries());
-  Object.assign(bdQt,{no:d.no??bdQt.no,date:d.date||bdQt.date,validDays:toNum(d.validDays)||30,attn:d.attn??'',ref:d.ref??'',disc:toNum(d.disc)||0,discPct:toNum(d.discPct)||0,signer:d.signer??'',signerPos:d.signerPos??'',note:d.note??'',terms:{pay:d.t_pay??'',lead:d.t_lead??'',warranty:d.t_warranty??'',note:d.t_note??''}});
+  Object.assign(bdQt,{part:d.part??bdQt.part,no:d.no??bdQt.no,date:d.date||bdQt.date,validDays:toNum(d.validDays)||30,attn:d.attn??'',ref:d.ref??'',disc:toNum(d.disc)||0,discPct:toNum(d.discPct)||0,signer:d.signer??'',signerPos:d.signerPos??'',note:d.note??'',terms:{pay:d.t_pay??'',lead:d.t_lead??'',warranty:d.t_warranty??'',note:d.t_note??''}});
   bdQt.items=[...f.querySelectorAll('[data-qi]')].map(tr=>{const v=k=>tr.querySelector(`[data-qf="${k}"]`).value;return{cat:v('cat'),code:v('code').trim(),desc:v('desc').trim(),size:v('size').trim(),qty:toNum(v('qty'))||0,unit:v('unit').trim(),price:toNum(v('price'))||0};});}
 async function qbSave(print){
   qbRead();const b=bdSel&&state.bids.find(x=>x.id===bdSel);if(!b)return;const q=bdQt,c=qtCalc(q);
   if(!q.items.some(i=>i.desc&&i.qty&&i.price)){toast('ใส่รายการพร้อมจำนวนและราคาอย่างน้อย 1 รายการ');return;}
-  if((b.quotes||[]).some(x=>x.no===q.no.trim())){toast('เลขที่ใบเสนอราคาซ้ำ');return;}
-  const qs=b.quotes||[],nq={rev:qs.length,no:q.no.trim(),date:q.date,valid:addDays(q.date,q.validDays),amount:Math.round(c.ex*100)/100,gen:true,items:q.items.filter(i=>i.desc),disc:q.disc,discPct:q.discPct,terms:q.terms,attn:q.attn,ref:q.ref,signer:q.signer,signerPos:q.signerPos,note:q.note,status:'draft',vat:c.vat,total:c.total};
-  const ok=await write(()=>db.doc('bids/'+b.id).update({quotes:[...qs,nq],status:['lead','survey'].includes(b.status)?'quoting':b.status,acts:[...(b.acts||[]),{date:q.date,type:'ส่งเอกสาร / ตัวอย่าง',note:`จัดทำใบเสนอราคา ${nq.no} R${nq.rev} มูลค่า ${baht(nq.amount)} บาท (รวม VAT ${baht(c.total)})${q.note?' · '+q.note:''}`,by:actBy()}],...stamp()}),'บันทึกใบเสนอราคาแล้ว · กด “ส่งแล้ว” เมื่อส่งให้ลูกค้า');
-  if(!ok)return;bdQt=false;const cur=state.bids.find(x=>x.id===b.id);if(cur&&!(cur.quotes||[]).some(x=>x.no===nq.no))cur.quotes=[...(cur.quotes||[]),nq];renderBid();if(print){fmProj='';openPrint('F-00',false,b.id+'|'+nq.no);}
+  const part=qtPartCheck(b,q.part);if(part==null)return;
+  const qs=b.quotes||[],ed=q.edit;
+  if(qs.some((x,j)=>j!==ed&&x.no===q.no.trim())){toast('เลขที่ใบเสนอราคาซ้ำ');return;}
+  const body={part,no:q.no.trim(),date:q.date,valid:addDays(q.date,q.validDays),amount:Math.round(c.ex*100)/100,gen:true,items:q.items.filter(i=>i.desc),disc:q.disc,discPct:q.discPct,terms:q.terms,attn:q.attn,ref:q.ref,signer:q.signer,signerPos:q.signerPos,note:q.note,vat:c.vat,total:c.total};
+  let nq,list,act;
+  if(ed!=null){const old=qs[ed];if(!old)return;nq={...old,...body,editedAt:new Date().toISOString()};list=qtRename(qs,qPart(old),part).map((x,j)=>j===ed?nq:x);
+    act={date:today(),type:'อื่น ๆ',note:`แก้ไขใบเสนอราคา ${nq.no} R${nq.rev} มูลค่า ${baht(nq.amount)} บาท${nq.amount!==Number(old.amount)?` (เดิม ${baht(old.amount)})`:''}`,by:actBy()};}
+  else{nq={rev:qOfPart(b,part).length,...body,status:'draft'};list=[...qs,nq];
+    act={date:q.date,type:'ส่งเอกสาร / ตัวอย่าง',note:`จัดทำใบเสนอราคา ${nq.no}${part?' ('+part+')':''} R${nq.rev} มูลค่า ${baht(nq.amount)} บาท (รวม VAT ${baht(c.total)})${q.note?' · '+q.note:''}`,by:actBy()};}
+  const ok=await write(()=>db.doc('bids/'+b.id).update({quotes:list,...(ed!=null?{}:{status:['lead','survey'].includes(b.status)?'quoting':b.status}),acts:[...(b.acts||[]),act],...stamp()}),ed!=null?'บันทึกการแก้ไขใบเสนอราคาแล้ว':'บันทึกใบเสนอราคาแล้ว · กด “ส่งแล้ว” เมื่อส่งให้ลูกค้า');
+  if(!ok)return;bdQt=false;const cur=state.bids.find(x=>x.id===b.id);if(cur)cur.quotes=list;renderBid();if(print){fmProj='';openPrint('F-00',false,b.id+'|'+nq.no);}
 }
 function mailtoQt(b,q){const c=q.items?qtCalc(q):{total:q.amount*1.07};const sub=`ใบเสนอราคา ${q.no} · ${b.name}`;const body=`เรียน ${q.attn||b.contact||b.customer}\n\nบริษัทขอเสนอราคา${q.ref?` ${q.ref}`:` ${b.name}`} ตามใบเสนอราคาเลขที่ ${q.no} ลงวันที่ ${dmy(q.date)}\nมูลค่ารวมทั้งสิ้น ${baht(c.total)} บาท (รวมภาษีมูลค่าเพิ่ม) ยืนราคาถึงวันที่ ${dmy(q.valid)}\n\nรายละเอียดตามไฟล์แนบ หากมีข้อสงสัยกรุณาติดต่อกลับ\n\nขอแสดงความนับถือ\n${q.signer||b.sales||''}`;
   return `mailto:${encodeURIComponent((b.phone||'').includes('@')?b.phone:'')}?subject=${encodeURIComponent(sub)}&body=${encodeURIComponent(body)}`;}
@@ -4719,7 +4819,7 @@ document.addEventListener('click',e=>{const b=e.target.closest('[data-tside]');i
 /* ---------- files (signed shop drawings) ---------- */
 function fileSrc(f){
   if(!f)return '';if(f.src)return f.src;if(photoCache[f.id])return photoCache[f.id];
-  if(f.id&&db&&!photoLoading.has(f.id)){photoLoading.add(f.id);db.doc('files/'+f.id).get().then(s=>{const d=s&&s.exists&&s.data();if(d&&d.data){photoCache[f.id]=d.data;scheduleRender();}}).catch(()=>{});}
+  lazyAsset(f.id,'files');
   return '';
 }
 async function storeFile(file,project){
@@ -4793,7 +4893,7 @@ async function unapproveDw(id){
 async function delDw(id){
   const key='dw/'+id;if(dwArm!==key){dwArm=key;renderS12();setTimeout(()=>{if(dwArm===key){dwArm=null;renderS12();}},4000);return;}
   dwArm=null;const d=state.drawings.find(x=>x.id===id);
-  await write(async()=>{await db.doc('drawings/'+id).delete();if(d?.file?.id&&!d.file.src)try{await db.doc('files/'+d.file.id).delete();}catch(_){}},'ลบแบบแล้ว');
+  await write(async()=>{await db.doc('drawings/'+id).delete();if(d?.file?.id&&!d.file.src)await delAsset(d.file.id,'files');},'ลบแบบแล้ว');
 }
 function renderS3(p){
   const ro=canWrite?'':'disabled',ds=drawingsOf(p),os=openingsOf(p),done=s1Done(p);
@@ -5452,6 +5552,38 @@ function demoData(){
   scan(document);
 })();
 
+/* ---------- money inputs: show 1,234,567.00 when not editing ----------
+   ช่องยังเป็น type="number" ค่าที่โค้ดอ่าน (value / FormData) จึงเป็นตัวเลขล้วนเหมือนเดิม แค่แสดงผลทับตอนไม่ได้พิมพ์
+   เลือกเฉพาะช่องที่เป็นเงิน — จำนวน ขนาด % วัน เดือน ไม่เกี่ยว */
+(function moneyInputs(){
+  const MONEY='#pvGoods,#pvInst,#pvDlv,#pBudMat,#pBudLab,#pBudOth,#ciRAmt,'+['price','amount','est','disc','budget','cost','dep','goods','dlv'].map(n=>`input[type=number][name="${n}"]`).join(',')+
+    ',input[type=number][data-ef="price"],input[type=number][data-qf="price"],input[type=number][data-rate]:not([data-rate="minArea"]),input[type=number][data-olr],input[type=number][data-socost],input[type=number][data-pf="rate"],input[type=number][data-mf="rate"]';
+  const desc=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');
+  const px=v=>parseFloat(v)||0;
+  function enhance(inp){
+    if(inp.dataset.money||!inp.parentNode)return;inp.dataset.money='1';
+    const par=getComputedStyle(inp.parentNode),cs=getComputedStyle(inp);
+    const w=document.createElement('span');w.className='mwrap';
+    if(/flex/.test(par.display)&&par.flexDirection==='column'&&!inp.style.width)w.classList.add('mfill');
+    const ov=document.createElement('span');ov.className='mfmt';ov.setAttribute('aria-hidden','true');
+    Object.assign(ov.style,{paddingLeft:(px(cs.paddingLeft)+px(cs.borderLeftWidth))+'px',paddingRight:(px(cs.paddingRight)+px(cs.borderRightWidth))+'px',
+      font:cs.font,color:cs.color,justifyContent:/right|end/.test(cs.textAlign)?'flex-end':/center/.test(cs.textAlign)?'center':'flex-start'});
+    inp.parentNode.insertBefore(w,inp);w.append(inp,ov);
+    const upd=()=>{const n=toNum(desc.get.call(inp));const s=n==null?'':nf2.format(moneyR2(n));ov.textContent=s;w.classList.toggle('mshow',!!s);};
+    inp._mupd=upd;
+    Object.defineProperty(inp,'value',{configurable:true,get(){return desc.get.call(this);},set(v){desc.set.call(this,v);upd();}});
+    inp.addEventListener('focus',()=>w.classList.add('medit'));
+    inp.addEventListener('blur',()=>{w.classList.remove('medit');upd();});
+    inp.addEventListener('input',upd);inp.addEventListener('change',upd);
+    if(document.activeElement===inp)w.classList.add('medit');
+    upd();
+  }
+  const scan=root=>{(root.querySelectorAll?root:document).querySelectorAll(MONEY).forEach(i=>{if(!i.dataset.money)enhance(i);});};
+  new MutationObserver(ms=>{for(const m of ms)for(const x of m.addedNodes)if(x.nodeType===1){if(x.matches?.(MONEY))enhance(x);else scan(x);}}).observe(document.body,{childList:true,subtree:true});
+  document.addEventListener('reset',e=>setTimeout(()=>e.target.querySelectorAll?.('[data-money]').forEach(i=>i._mupd&&i._mupd()),0),true);
+  scan(document);
+})();
+
 /* ---------- boot ---------- */
 async function resolveNames(){
   if(!user||!user.profiles)return;
@@ -5460,7 +5592,11 @@ async function resolveNames(){
   try{const ps=await user.profiles(ids);for(const id of ids)names[id]=(ps&&ps[id]&&ps[id].name)||'';if(state.sel)renderDrawer();}catch(_){}
 }
 (async function boot(){
-  window.demoData=demoData;window.toast=toast;
+  /* ข้อมูลตัวอย่างใส่ลงฐานข้อมูลว่างเฉพาะเมื่อเปิดด้วย ?demo=1 — ปกติเริ่มระบบว่าง (กันข้อมูลตัวอย่างหลุดเข้าระบบจริง)
+     demoData เป็นฟังก์ชันระดับ global จึงต้องถอดออกจาก window เอง; โหมดตัวอย่างในเบราว์เซอร์ยังใช้ sampleData ได้ */
+  const sampleData=demoData;
+  window.demoData=new URLSearchParams(location.search).get('demo')==='1'?sampleData:undefined;
+  window.toast=toast;
   try{const v=localStorage.getItem('view');if(['bid','proj','team','port','daily','issues','forms','poc','cash','users'].includes(v))state.view=v;if(localStorage.getItem('vat')==='inc')state.vat='inc';const ts=localStorage.getItem('teamSub');if(ts)state.teamSub=ts;}catch(_){}
   setTab('map');
   let demo=!window.claude||!window.claude.use;
@@ -5470,11 +5606,11 @@ async function resolveNames(){
       try{const w=await u.can('data.write');if(w===false){sysWrite=false;renderAll();}}catch(_){}
       try{const e=await u.canEdit();if(e===false){sysFin=false;renderAll();}}catch(_){}
       resolveNames();});
-    claude.use('assets').then(a=>{assetsNs=a||null;}).catch(()=>{});
+    claude.use('assets').then(a=>{assetsNs=assetsCompat(a);}).catch(()=>{});
     db=await claude.use('db');
     if(!db)demo=true;
   }
-  if(demo){db=memDb(demoData());DEMO=true;}
+  if(demo){db=memDb(sampleData());DEMO=true;}
   const onErr=()=>{$('status').textContent='การเชื่อมต่อข้อมูลหยุด โหลดหน้าใหม่เพื่อลองอีกครั้ง';};
   db.collection('openings').onSnapshot(snap=>{
     const m={};snap.docs.forEach(d=>{const v=d.data();if(v)m[d.id]={...v,code:v.code||d.id};});state.openings=m;
