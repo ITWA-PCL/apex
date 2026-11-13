@@ -197,6 +197,47 @@
         flex-wrap: wrap;
         gap: 6px;
       }
+      .apex-pwd-modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(4, 9, 16, 0.88);
+        backdrop-filter: blur(8px);
+        z-index: 100000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+      }
+      .apex-pwd-modal-card {
+        background: #0d1522;
+        border: 1px solid #23354d;
+        border-radius: 18px;
+        padding: 26px;
+        max-width: 440px;
+        width: 100%;
+        color: #f0f6fc;
+        box-shadow: 0 25px 60px rgba(0,0,0,0.65);
+        font-family: inherit;
+      }
+      .apex-pwd-checklist {
+        background: #070d16;
+        border: 1px solid #1c2a3d;
+        border-radius: 10px;
+        padding: 12px 14px;
+        margin: 12px 0 16px;
+        font-size: 11.5px;
+        line-height: 1.6;
+      }
+      .apex-pwd-check-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: #8b9bb0;
+      }
+      .apex-pwd-check-item.valid {
+        color: #3fb950;
+        font-weight: 600;
+      }
       .apex-settings-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -251,6 +292,7 @@
     }
 
     overlay.hidden = false;
+    const loginRenderTs = Date.now();
     overlay.innerHTML = `
       <div class="apex-login-card">
         <div class="apex-login-badge">🛡️ Window Asia Public Co., Ltd. · ISO/IEC 27001:2022</div>
@@ -266,6 +308,12 @@
         <div class="apex-login-divider">หรือเข้าสู่ระบบสำหรับผู้ดูแลระบบ / บัญชี Non-AD</div>
 
         <form id="apexLocalLoginForm">
+          <!-- Layer 2: In-App Decoy Honeypot Trap (Spec v2.12.0 หมวด F.3) -->
+          <div style="position:absolute;left:-9999px;opacity:0;height:0;width:0;overflow:hidden;pointer-events:none;" aria-hidden="true" tabindex="-1">
+            <input type="text" name="corporate_fax" id="apexLoginCorporateFax" tabindex="-1" autocomplete="off">
+            <input type="text" name="security_honey" id="apexLoginSecurityHoney" tabindex="-1" autocomplete="off">
+          </div>
+
           <label class="apex-login-field">
             <span>อีเมล หรือ รหัสผู้ใช้งาน (User ID)</span>
             <input type="text" name="identifier" id="apexLoginIdentifier" placeholder="กรอกอีเมลหรือรหัสผู้ใช้งาน" required autocomplete="username">
@@ -303,10 +351,19 @@
       try {
         const identifier = overlay.querySelector('#apexLoginIdentifier')?.value || '';
         const password = overlay.querySelector('#apexLoginPassword')?.value || '';
+        const corporate_fax = overlay.querySelector('#apexLoginCorporateFax')?.value || undefined;
+        const security_honey = overlay.querySelector('#apexLoginSecurityHoney')?.value || undefined;
+
         const res = await fetch('/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ identifier, password })
+          body: JSON.stringify({
+            identifier,
+            password,
+            corporate_fax,
+            security_honey,
+            form_render_ts: loginRenderTs
+          })
         });
         const out = await res.json();
         if (!res.ok) {
@@ -320,6 +377,16 @@
           }
           return;
         }
+
+        // Check if 90-day password rotation applies (Spec v2.12.0 หมวด G - Local Account Only)
+        if (out.must_change_password) {
+          overlay.hidden = true;
+          renderForcedPasswordChangeModal(out.user, out.password_days_left, () => {
+            window.location.reload();
+          });
+          return;
+        }
+
         // Clear any old impersonation state and reload with active session cookie
         try {
           sessionStorage.removeItem('actAs');
@@ -334,6 +401,129 @@
           submitBtn.disabled = false;
           submitBtn.textContent = 'เข้าสู่ระบบ (Sign In) →';
         }
+      }
+    });
+  }
+
+  function renderForcedPasswordChangeModal(user, daysLeft, onDone) {
+    let modal = document.getElementById('apex-pwd-change-modal');
+    if (modal) modal.remove();
+
+    modal = document.createElement('div');
+    modal.id = 'apex-pwd-change-modal';
+    modal.className = 'apex-pwd-modal-overlay noprint';
+
+    modal.innerHTML = `
+      <div class="apex-pwd-modal-card">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="font-size:22px">🔒</span>
+          <h2 style="font-size:16px;font-weight:700;margin:0;color:#f0f6fc">จำเป็นต้องเปลี่ยนรหัสผ่านใหม่</h2>
+        </div>
+        <p style="font-size:12px;color:#8b9bb0;margin:0 0 12px;line-height:1.5">
+          บัญชีท้องถิ่น (${user?.name || user?.id || 'Local User'}) ถึงกำหนดเปลี่ยนรหัสผ่านตามรอบความปลอดภัย 90 วัน (ISO 27001) กรุณาตั้งรหัสผ่านใหม่เพื่อเข้าใช้งาน
+        </p>
+
+        <div id="apexPwdModalError" class="apex-login-error" hidden></div>
+
+        <div class="apex-pwd-checklist">
+          <div style="font-weight:600;color:#c9d6e3;margin-bottom:4px">ข้อกำหนดความปลอดภัยของรหัสผ่าน (Complexity):</div>
+          <div id="chkLen" class="apex-pwd-check-item"><span>•</span> ความยาว 8 ถึง 16 ตัวอักษร</div>
+          <div id="chkUpper" class="apex-pwd-check-item"><span>•</span> ตัวอักษรพิมพ์ใหญ่ (A-Z) อย่างน้อย 1 ตัว</div>
+          <div id="chkLower" class="apex-pwd-check-item"><span>•</span> ตัวอักษรพิมพ์เล็ก (a-z) อย่างน้อย 1 ตัว</div>
+          <div id="chkDigit" class="apex-pwd-check-item"><span>•</span> ตัวเลข (0-9) อย่างน้อย 1 ตัว</div>
+          <div id="chkSpecial" class="apex-pwd-check-item"><span>•</span> อักขระพิเศษ (!@#$%^&*...) อย่างน้อย 1 ตัว</div>
+          <div id="chkNoUser" class="apex-pwd-check-item"><span>•</span> ไม่มีชื่อผู้ใช้ในรหัสผ่าน</div>
+        </div>
+
+        <form id="apexForcedPwdForm">
+          <label class="apex-login-field">
+            <span>รหัสผ่านเดิม (Current Password) *</span>
+            <input type="password" id="apexOldPassword" required placeholder="กรอกรหัสผ่านปัจจุบัน">
+          </label>
+          <label class="apex-login-field">
+            <span>รหัสผ่านใหม่ (New Password) *</span>
+            <input type="password" id="apexNewPassword" maxlength="16" required placeholder="8-16 ตัวอักษร">
+          </label>
+          <label class="apex-login-field">
+            <span>ยืนยันรหัสผ่านใหม่ (Confirm Password) *</span>
+            <input type="password" id="apexConfirmPassword" maxlength="16" required placeholder="กรอกรหัสผ่านใหม่อีกครั้ง">
+          </label>
+          <button type="submit" class="apex-login-submit" id="btnSubmitNewPassword" disabled style="opacity:0.55">
+            บันทึกรหัสผ่านใหม่ (มีอายุ 90 วัน) →
+          </button>
+        </form>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    const oldPwdInput = modal.querySelector('#apexOldPassword');
+    const newPwdInput = modal.querySelector('#apexNewPassword');
+    const confirmPwdInput = modal.querySelector('#apexConfirmPassword');
+    const submitBtn = modal.querySelector('#btnSubmitNewPassword');
+    const errBox = modal.querySelector('#apexPwdModalError');
+    const username = String(user?.name || user?.id || '').trim();
+
+    function updateChecklist() {
+      const p = newPwdInput.value || '';
+      const c = confirmPwdInput.value || '';
+
+      const isLen = p.length >= 8 && p.length <= 16;
+      const isUpper = /[A-Z]/.test(p);
+      const isLower = /[a-z]/.test(p);
+      const isDigit = /[0-9]/.test(p);
+      const isSpecial = /[!@#$%^&*()_+\-=\[\]{}|;:,.<>?/~`]/.test(p);
+      const isNoUser = !username || username.length < 3 || !p.toLowerCase().includes(username.toLowerCase());
+      const isMatch = p && p === c;
+
+      modal.querySelector('#chkLen').className = 'apex-pwd-check-item' + (isLen ? ' valid' : '');
+      modal.querySelector('#chkUpper').className = 'apex-pwd-check-item' + (isUpper ? ' valid' : '');
+      modal.querySelector('#chkLower').className = 'apex-pwd-check-item' + (isLower ? ' valid' : '');
+      modal.querySelector('#chkDigit').className = 'apex-pwd-check-item' + (isDigit ? ' valid' : '');
+      modal.querySelector('#chkSpecial').className = 'apex-pwd-check-item' + (isSpecial ? ' valid' : '');
+      modal.querySelector('#chkNoUser').className = 'apex-pwd-check-item' + (isNoUser ? ' valid' : '');
+
+      const allValid = isLen && isUpper && isLower && isDigit && isSpecial && isNoUser && isMatch && oldPwdInput.value;
+      submitBtn.disabled = !allValid;
+      submitBtn.style.opacity = allValid ? '1' : '0.55';
+    }
+
+    newPwdInput.addEventListener('input', updateChecklist);
+    confirmPwdInput.addEventListener('input', updateChecklist);
+    oldPwdInput.addEventListener('input', updateChecklist);
+
+    modal.querySelector('#apexForcedPwdForm').addEventListener('submit', async e => {
+      e.preventDefault();
+      errBox.hidden = true;
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'กำลังบันทึกรหัสผ่านใหม่...';
+
+      try {
+        const res = await fetch('/api/auth/local/change-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            old_password: oldPwdInput.value,
+            new_password: newPwdInput.value
+          })
+        });
+        const d = await res.json();
+        if (!res.ok) {
+          errBox.textContent = d.message || 'ไม่สามารถเปลี่ยนรหัสผ่านได้';
+          errBox.hidden = false;
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'บันทึกรหัสผ่านใหม่ (มีอายุ 90 วัน) →';
+          return;
+        }
+
+        modal.remove();
+        alert('เปลี่ยนรหัสผ่านเรียบร้อยแล้ว (มีผลบังคับใช้ 90 วันตามมาตรฐาน ISO 27001)');
+        if (typeof onDone === 'function') onDone();
+      } catch (err) {
+        errBox.textContent = 'เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์';
+        errBox.hidden = false;
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'บันทึกรหัสผ่านใหม่ (มีอายุ 90 วัน) →';
       }
     });
   }

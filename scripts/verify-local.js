@@ -455,6 +455,251 @@ async function runVerification() {
   );
   console.log(' [OK] Post-Login RBAC, Privilege Escalation Prevention & Collection/Project Scoping verified');
 
+  // 10. Spec v2.12.0: In-App Bot Defense, 90-Day Forced Password Rotation & Local Complexity Verification
+  const headersMod = require('../app/src/security/headers');
+
+  // 10a. Layer 1 Bot Defense: Auth Rate Limiter (10 req / 60s + Whitelist + Retry-After)
+  const authLimiter = headersMod.createAuthRateLimiter({ limit: 10, windowMs: 60000 });
+  const testIp = '203.0.113.42'; // External untrusted IP
+  let limitedStatus = null;
+  let retryAfterHeader = null;
+  const mockResLimit = {
+    setHeader(k, v) {
+      if (k.toLowerCase() === 'retry-after') retryAfterHeader = v;
+    },
+    status(code) {
+      limitedStatus = code;
+      return this;
+    },
+    json() {
+      return this;
+    }
+  };
+
+  // 10 requests should pass through
+  for (let i = 1; i <= 10; i++) {
+    let passed = false;
+    authLimiter({ headers: { 'x-forwarded-for': testIp } }, mockResLimit, () => {
+      passed = true;
+    });
+    assert.strictEqual(passed, true, `Auth rate limiter must allow request #${i}`);
+  }
+  // 11th request must be rejected with 429 and Retry-After
+  let eleventhPassed = false;
+  authLimiter({ headers: { 'x-forwarded-for': testIp } }, mockResLimit, () => {
+    eleventhPassed = true;
+  });
+  assert.strictEqual(eleventhPassed, false, '11th auth request must be blocked by rate limiter');
+  assert.strictEqual(limitedStatus, 429, 'Auth rate limiter must return 429 Too Many Requests');
+  assert.ok(retryAfterHeader, 'Auth rate limiter must emit Retry-After header');
+
+  // Corporate Whitelist IP should never be blocked
+  for (let i = 1; i <= 25; i++) {
+    let wlPassed = false;
+    authLimiter({ headers: { 'x-forwarded-for': '157.173.219.153' } }, mockResLimit, () => {
+      wlPassed = true;
+    });
+    assert.strictEqual(wlPassed, true, 'Corporate Whitelist IP (157.173.219.153) must bypass rate limiter');
+  }
+
+  // 10b. Layer 2 Honeypot Decoy Trap & Layer 3 Timing Velocity Guard in /api/auth/login
+  async function invokeAuthLogin(body, clientIp = '127.0.0.1') {
+    return new Promise(resolve => {
+      const req = {
+        method: 'POST',
+        path: '/api/auth/login',
+        url: '/api/auth/login',
+        originalUrl: '/api/auth/login',
+        headers: { 'x-forwarded-for': clientIp },
+        body
+      };
+      const res = {
+        statusCode: 200,
+        headers: {},
+        body: null,
+        setHeader(k, v) {
+          this.headers[k] = v;
+        },
+        status(code) {
+          this.statusCode = code;
+          return this;
+        },
+        json(payload) {
+          this.body = payload;
+          resolve({ statusCode: this.statusCode, body: payload });
+          return this;
+        }
+      };
+      ciamRouter.handle(req, res, () => {
+        resolve({ statusCode: res.statusCode, body: res.body });
+      });
+    });
+  }
+
+  // Honeypot filled -> Silent 401 Rejection
+  const honeypotRes = await invokeAuthLogin({
+    identifier: 'C01',
+    password: 'SomePassword!1',
+    corporate_fax: 'spambot_fax_number'
+  });
+  assert.strictEqual(honeypotRes.statusCode, 401, 'Honeypot trap must reject with 401 Unauthorized');
+
+  // Timing Velocity Guard (< 400ms) -> 400 Bad Request
+  const tooFastRes = await invokeAuthLogin({
+    identifier: 'C01',
+    password: 'SomePassword!1',
+    form_render_ts: Date.now() - 100 // 100ms ago -> Bot automated submit
+  });
+  assert.strictEqual(tooFastRes.statusCode, 400, 'Velocity timing guard (< 400ms) must reject with 400 Bad Request');
+  assert.strictEqual(tooFastRes.body.code, 'BOT_TIMING_VIOLATION');
+
+  // 10c. Enterprise Password Complexity Standard (Spec v2.12.0 หมวด G.1)
+  const validateComplexity = ciamRouter.validatePasswordComplexity;
+  assert.ok(validateComplexity('short', 'somchai'), 'Must reject length < 8');
+  assert.ok(validateComplexity('ThisIsWayTooLongPasswordForSure12345!', 'somchai'), 'Must reject length > 16');
+  assert.ok(validateComplexity('alllowercase123!', 'somchai'), 'Must reject missing uppercase');
+  assert.ok(validateComplexity('ALLUPPERCASE123!', 'somchai'), 'Must reject missing lowercase');
+  assert.ok(validateComplexity('NoDigitsSpecial!', 'somchai'), 'Must reject missing digit');
+  assert.ok(validateComplexity('NoSpecialChar123', 'somchai'), 'Must reject missing special char');
+  assert.ok(validateComplexity('SomchaiPass123!', 'somchai'), 'Must reject username contained in password');
+  assert.strictEqual(validateComplexity('SecurePass!2026', 'somchai'), null, 'Valid 8-16 complex password must pass');
+
+  // 10d. 90-Day Forced Password Rotation Policy (STRICT RULE: Local Only, NEVER AD!)
+  const checkExpiry = ciamRouter.checkPasswordExpiry90Days;
+  const eightyNineDaysAgo = new Date(Date.now() - 89 * 86400000).toISOString();
+  const ninetyOneDaysAgo = new Date(Date.now() - 91 * 86400000).toISOString();
+
+  const notExpired = checkExpiry(eightyNineDaysAgo);
+  assert.strictEqual(notExpired.expired, false, '89 days old password must NOT be expired');
+  assert.strictEqual(notExpired.daysLeft, 1, '89 days old password should have 1 day left');
+
+  const expired = checkExpiry(ninetyOneDaysAgo);
+  assert.strictEqual(expired.expired, true, '91 days old password MUST be expired');
+  assert.strictEqual(expired.daysLeft, 0, '91 days old password must have 0 days left');
+
+  // Create Local Account C01 with 91 days old password
+  await db.updateDoc(
+    'users',
+    'C01',
+    {
+      password_hash: db.hashPassword('SubPass!222'),
+      use_ad_auth: false,
+      password_changed_at: ninetyOneDaysAgo,
+      must_change_password: false
+    },
+    'test'
+  );
+
+  // Login Local Account -> MUST require password change
+  const localLoginRes = await invokeAuthLogin({
+    identifier: 'C01',
+    password: 'SubPass!222',
+    form_render_ts: Date.now() - 2000
+  });
+  assert.strictEqual(localLoginRes.statusCode, 200, 'Local user login with valid credentials must succeed');
+  assert.strictEqual(
+    localLoginRes.body.must_change_password,
+    true,
+    'Local Account with password > 90 days MUST be flagged with must_change_password=true'
+  );
+
+  // Create AD Account A01 with 91 days old password -> MUST NEVER be flagged
+  await db.setDoc(
+    'users',
+    'A01',
+    {
+      id: 'A01',
+      uid: 'A01',
+      email: 'aduser@windowasia.com',
+      name: 'AD Corporate User',
+      role: 'foreman',
+      kind: 'internal',
+      use_ad_auth: true, // AD Account!
+      password_hash: db.hashPassword('AdPass!888'),
+      password_changed_at: ninetyOneDaysAgo,
+      must_change_password: false
+    },
+    'test'
+  );
+
+  const adLoginRes = await invokeAuthLogin({
+    identifier: 'A01',
+    password: 'AdPass!888',
+    form_render_ts: Date.now() - 2000
+  });
+  assert.strictEqual(adLoginRes.statusCode, 200, 'AD user login must succeed');
+  assert.strictEqual(
+    adLoginRes.body.must_change_password,
+    false,
+    'AD Account MUST NEVER be forced to rotate password or have must_change_password=true'
+  );
+  console.log(' [OK] Spec v2.12.0 Bot Defense & 90-Day Local Password Policy (Strict AD Exclusion) verified');
+
+  // 10e. CIAM Authority Lock (is_status_locked) on Directory Status API
+  await db.setDoc(
+    'users',
+    'LOCK01',
+    {
+      id: 'LOCK01',
+      uid: 'LOCK01',
+      email: 'locked@windowasia.com',
+      role: 'viewer',
+      active: true,
+      is_status_locked: true // Locked by CIAM Central Authority!
+    },
+    'test'
+  );
+
+  await db.updateSystemSettings({ ciam_management_api_key: 'test_mgmt_key_123' });
+
+  async function invokeDirectoryPatch(username, body) {
+    return new Promise(resolve => {
+      const req = {
+        method: 'PATCH',
+        path: `/api/v1/directory/accounts/${username}/status`,
+        url: `/api/v1/directory/accounts/${username}/status`,
+        originalUrl: `/api/v1/directory/accounts/${username}/status`,
+        headers: {
+          'x-management-api-key': 'test_mgmt_key_123',
+          'x-forwarded-for': '157.173.219.153'
+        },
+        params: { username },
+        body
+      };
+      const res = {
+        statusCode: 200,
+        headers: {},
+        body: null,
+        status(code) {
+          this.statusCode = code;
+          return this;
+        },
+        json(payload) {
+          this.body = payload;
+          resolve({ statusCode: this.statusCode, body: payload });
+          return this;
+        }
+      };
+      ciamRouter.handle(req, res, () => {
+        resolve({ statusCode: res.statusCode, body: res.body });
+      });
+    });
+  }
+
+  // Attempting status change on locked account without force_override must be rejected with 409
+  const lockedPatchRes = await invokeDirectoryPatch('LOCK01', { is_active: false });
+  assert.strictEqual(
+    lockedPatchRes.statusCode,
+    409,
+    'Status update on account with is_status_locked=true must be rejected with 409 Conflict'
+  );
+  assert.strictEqual(lockedPatchRes.body.error, 'status_locked');
+
+  // With force_override: true, authority override succeeds
+  const forcePatchRes = await invokeDirectoryPatch('LOCK01', { is_active: false, force_override: true });
+  assert.strictEqual(forcePatchRes.statusCode, 200, 'Authority override with force_override=true must succeed');
+  console.log(' [OK] Spec v2.12.0 CIAM Authority Lock (is_status_locked) & 1-Click Status API verified');
+
   console.log('=================================================================');
   console.log(' ✅ ALL LOCAL COMPILE & SECURITY/FINANCE CHECKS PASSED (0 ERRORS)');
   console.log('=================================================================');

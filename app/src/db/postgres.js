@@ -90,6 +90,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   ciam_client_secret: '',
   ciam_redirect_uri: 'https://apex.windowasia.com/api/auth/sso/callback',
   ciam_post_logout_redirect_uri: 'https://apex.windowasia.com/auth/start',
+  ciam_portal_url: 'https://ciam.windowasia.com/portal',
   ciam_management_api_key: '',
   ciam_allowed_ips: '157.173.219.153,127.0.0.1,::1',
   break_glass_enabled: 'false',

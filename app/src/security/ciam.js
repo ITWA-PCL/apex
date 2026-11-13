@@ -1,16 +1,94 @@
 /**
- * APEX (apex.windowasia.com) - Track A: Window Asia Central IAM (CIAM) v2.9.0 Spoke Integration
- * Implements Groups A, B, C, D & Audit Logging per CIAM_SPOKE_ENTERPRISE_INTEGRATION_SPECIFICATION_v2.9.0.md
+ * APEX (apex.windowasia.com) - Track A: Window Asia Central IAM (CIAM) v2.12.0 Spoke Integration
+ * Implements Groups A-D, Audit Logging, In-App Bot Defense (หมวด F),
+ * and Enterprise Local Password Policy & 90-Day Rotation (หมวด G).
+ * Compliance: ISO 27001 / OIDC / PKCE S256 / RFC 9700
  */
 const express = require('express');
 const crypto = require('crypto');
 const db = require('../db/postgres');
 const { ssoSessions, parseCookies } = require('./rbac');
+const { createAuthRateLimiter } = require('./headers');
 
 const router = express.Router();
 
 // Store temporary PKCE challenges in memory (state -> { codeVerifier, createdAt, returnTo })
 const pkceStore = new Map();
+
+const LOCAL_PASSWORD_EXPIRY_DAYS = 90;
+
+/**
+ * Enterprise Password Complexity Standard (Spec v2.12.0 หมวด G.1 & G.4.B):
+ * - 8 to 16 characters (strictly enforced)
+ * - Uppercase (A-Z) >= 1
+ * - Lowercase (a-z) >= 1
+ * - Digit (0-9) >= 1
+ * - Special Character (!@#$%^&*()_+-=[]{}|;:,.<>?/~`) >= 1
+ * - No Username in password (case-insensitive check for username length >= 3)
+ */
+function validatePasswordComplexity(password, username) {
+  if (!password || typeof password !== 'string') {
+    return 'กรุณาระบุรหัสผ่าน';
+  }
+  const pwd = password.trim();
+  if (pwd.length < 8 || pwd.length > 16) {
+    return `รหัสผ่านต้องมีความยาวระหว่าง 8 ถึง 16 ตัวอักษร (ปัจจุบัน ${pwd.length} ตัวอักษร)`;
+  }
+  if (!/[A-Z]/.test(pwd)) {
+    return 'รหัสผ่านต้องมีตัวอักษรพิมพ์ใหญ่ (A-Z) อย่างน้อย 1 ตัว';
+  }
+  if (!/[a-z]/.test(pwd)) {
+    return 'รหัสผ่านต้องมีตัวอักษรพิมพ์เล็ก (a-z) อย่างน้อย 1 ตัว';
+  }
+  if (!/[0-9]/.test(pwd)) {
+    return 'รหัสผ่านต้องมีตัวเลข (0-9) อย่างน้อย 1 ตัว';
+  }
+  if (!/[!@#$%^&*()_+\-=\[\]{}|;:,.<>?/~`]/.test(pwd)) {
+    return 'รหัสผ่านต้องมีอักขระพิเศษ (!@#$%^&*...) อย่างน้อย 1 ตัว';
+  }
+  if (username && typeof username === 'string' && username.trim().length >= 3) {
+    const uLower = username.trim().toLowerCase();
+    if (pwd.toLowerCase().includes(uLower)) {
+      return 'รหัสผ่านต้องไม่มีชื่อผู้ใช้ (Username) ปะปนอยู่';
+    }
+  }
+  return null;
+}
+
+/**
+ * Return (is_expired: bool, days_elapsed: int, days_left: int) based on 90-day rotation policy.
+ */
+function checkPasswordExpiry90Days(passwordChangedAt, createdAt) {
+  const now = Date.now();
+  const base = passwordChangedAt
+    ? new Date(passwordChangedAt).getTime()
+    : (createdAt ? new Date(createdAt).getTime() : now);
+  const elapsedDays = Math.floor((now - base) / (1000 * 60 * 60 * 24));
+  const daysLeft = Math.max(0, LOCAL_PASSWORD_EXPIRY_DAYS - elapsedDays);
+  return {
+    expired: elapsedDays >= LOCAL_PASSWORD_EXPIRY_DAYS,
+    daysElapsed: elapsedDays,
+    daysLeft
+  };
+}
+
+// Enterprise Layer 1 Sliding-Window IP Rate Limiter (10 req/60s on Auth)
+const authRateLimiter = createAuthRateLimiter({
+  limit: 10,
+  windowMs: 60000,
+  onRateLimited: async (req, ip, retryAfter) => {
+    await db.insertAuditLog({
+      eventCode: 'IP_RATE_LIMITED',
+      ipAddress: ip,
+      targetResource: '/api/auth/login',
+      details: {
+        reason: 'rate_limit_exceeded',
+        threshold: '10_per_60s',
+        retry_after: retryAfter
+      }
+    });
+  }
+});
 
 function getClientIp(req) {
   return (
@@ -57,6 +135,7 @@ router.get('/api/settings/ciam-sso', async (req, res) => {
       ciam_management_api_key_masked: maskSecret(s.ciam_management_api_key),
       has_management_api_key: Boolean(s.ciam_management_api_key),
       ciam_allowed_ips: s.ciam_allowed_ips,
+      ciam_portal_url: s.ciam_portal_url || 'https://ciam.windowasia.com/portal',
       break_glass_enabled: s.break_glass_enabled === 'true',
       break_glass_url: s.break_glass_url || 'http://172.18.0.1:3100',
       ai_copilot_enabled: s.ai_copilot_enabled === 'true',
@@ -74,7 +153,7 @@ router.get('/api/settings/ciam-sso', async (req, res) => {
   }
 });
 
-router.post('/api/settings/ciam-sso', async (req, res) => {
+async function handleUpdateCiamSettings(req, res) {
   try {
     if (!req.apexUser?.permissions?.includes('users')) {
       return res.status(403).json({ error: 'forbidden', message: 'เฉพาะผู้ดูแลระบบเท่านั้น' });
@@ -89,6 +168,7 @@ router.post('/api/settings/ciam-sso', async (req, res) => {
       'ciam_redirect_uri',
       'ciam_post_logout_redirect_uri',
       'ciam_allowed_ips',
+      'ciam_portal_url',
       'break_glass_url',
       'ai_provider_url',
       'ai_model_name'
@@ -111,7 +191,12 @@ router.post('/api/settings/ciam-sso', async (req, res) => {
       updates.ai_api_key = String(body.ai_api_key).trim();
     }
     if (body.admin_local_password && !body.admin_local_password.includes('••••')) {
-      updates.admin_password_hash = db.hashPassword(String(body.admin_local_password).trim());
+      const pwd = String(body.admin_local_password).trim();
+      const compErr = validatePasswordComplexity(pwd, 'admin');
+      if (compErr) {
+        return res.status(400).json({ error: 'complexity_violation', message: compErr });
+      }
+      updates.admin_password_hash = db.hashPassword(pwd);
     }
 
     await db.updateSystemSettings(updates, req.apexUser.id);
@@ -129,7 +214,11 @@ router.post('/api/settings/ciam-sso', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'internal_error', message: err.message });
   }
-});
+}
+
+// Support both PUT (Spec A.2) and POST for backwards compatibility
+router.put('/api/settings/ciam-sso', handleUpdateCiamSettings);
+router.post('/api/settings/ciam-sso', handleUpdateCiamSettings);
 
 router.post('/api/settings/ciam-sso/test', async (req, res) => {
   try {
@@ -196,12 +285,58 @@ router.get('/api/auth/session', async (req, res) => {
   }
 });
 
-router.post('/api/auth/login', async (req, res) => {
+router.post('/api/auth/login', authRateLimiter, async (req, res) => {
   try {
-    const { identifier, password } = req.body || {};
+    const { identifier, password, corporate_fax, security_honey, form_render_ts } = req.body || {};
     const s = await db.getSystemSettings();
     const users = await db.getCollection('users');
     const cleanId = String(identifier || '').trim().toLowerCase();
+    const clientIp = getClientIp(req);
+
+    // Layer 2: Decoy Honeypot Trap Evaluation (Spec v2.12.0 หมวด F.3)
+    if (corporate_fax || security_honey) {
+      await db.insertAuditLog({
+        eventCode: 'BOT_HONEYPOT_DETECTED',
+        actorEmail: cleanId || 'unknown',
+        ipAddress: clientIp,
+        targetResource: '/api/auth/login',
+        details: {
+          reason: 'honeypot_field_filled',
+          corporate_fax: Boolean(corporate_fax),
+          security_honey: Boolean(security_honey)
+        }
+      });
+      // Silent rejection with standard credentials error (hides honeypot presence from bot)
+      return res.status(401).json({
+        error: 'invalid_credentials',
+        message: 'รหัสผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง'
+      });
+    }
+
+    // Layer 3: Submission Velocity & Timing Guard (Spec v2.12.0 หมวด F.4)
+    if (form_render_ts !== undefined && form_render_ts !== null && form_render_ts !== '') {
+      const ts = Number(form_render_ts);
+      if (!isNaN(ts)) {
+        const deltaMs = Date.now() - ts;
+        if (deltaMs < 400 || deltaMs < -10000) {
+          await db.insertAuditLog({
+            eventCode: 'BOT_TIMING_VIOLATION',
+            actorEmail: cleanId || 'unknown',
+            ipAddress: clientIp,
+            targetResource: '/api/auth/login',
+            details: {
+              delta_ms: deltaMs,
+              reason: deltaMs < 400 ? 'submission_too_fast' : 'timestamp_in_future'
+            }
+          });
+          return res.status(400).json({
+            error: 'velocity_timing_violation',
+            code: 'BOT_TIMING_VIOLATION',
+            message: 'ตรวจพบความเร็วการส่งข้อมูลผิดปกติของมนุษย์ (< 400ms)'
+          });
+        }
+      }
+    }
 
     if (!cleanId || !password) {
       return res.status(400).json({
@@ -225,7 +360,7 @@ router.post('/api/auth/login', async (req, res) => {
       await db.insertAuditLog({
         eventCode: 'SSO-02',
         actorEmail: cleanId,
-        ipAddress: getClientIp(req),
+        ipAddress: clientIp,
         targetResource: '/api/auth/login',
         details: { reason: 'user_not_found', identifier: cleanId }
       });
@@ -242,7 +377,7 @@ router.post('/api/auth/login', async (req, res) => {
         actorId: userRecord.id,
         actorEmail: userRecord.email || cleanId,
         actorRole: userRecord.role,
-        ipAddress: getClientIp(req),
+        ipAddress: clientIp,
         targetResource: '/api/auth/login',
         details: { reason: 'inactive_account_blocked', status_origin: userRecord.status_origin || 'LOCAL' }
       });
@@ -267,7 +402,7 @@ router.post('/api/auth/login', async (req, res) => {
         actorId: userRecord.id,
         actorEmail: userRecord.email || cleanId,
         actorRole: userRecord.role,
-        ipAddress: getClientIp(req),
+        ipAddress: clientIp,
         targetResource: '/api/auth/login',
         details: { reason: 'invalid_password' }
       });
@@ -277,12 +412,32 @@ router.post('/api/auth/login', async (req, res) => {
       });
     }
 
+    // MANDATORY RULE: 90-Day Forced Password Rotation & Complexity (Spec v2.12.0 หมวด G)
+    // Applies ONLY to Local Accounts (use_ad_auth === false or Local Admin login)!
+    // MUST NEVER apply to AD Accounts (use_ad_auth === true)!
+    const isAdUser = userRecord.use_ad_auth === true || (userRecord.use_ad_auth === undefined && userRecord.kind !== 'external');
+    let mustChangePassword = false;
+    let passwordExpired = false;
+    let daysLeft = 90;
+
+    if (!isAdUser) {
+      const expiry = checkPasswordExpiry90Days(userRecord.password_changed_at, userRecord.createdAt);
+      passwordExpired = expiry.expired;
+      daysLeft = expiry.daysLeft;
+      mustChangePassword = Boolean(userRecord.must_change_password) || expiry.expired;
+    } else {
+      // AD Account: Strictly bypassed 100%!
+      mustChangePassword = false;
+      passwordExpired = false;
+    }
+
     const sessionId = crypto.randomBytes(32).toString('hex');
     ssoSessions.set(sessionId, {
       userId: userRecord.id,
       uid: userRecord.uid || userRecord.id,
       email: userRecord.email || `${String(userRecord.id).toLowerCase()}@windowasia.co.th`,
-      authenticatedAt: new Date().toISOString()
+      authenticatedAt: new Date().toISOString(),
+      mustChangePassword
     });
 
     await db.insertAuditLog({
@@ -290,9 +445,14 @@ router.post('/api/auth/login', async (req, res) => {
       actorId: userRecord.id,
       actorEmail: userRecord.email || cleanId,
       actorRole: userRecord.role,
-      ipAddress: getClientIp(req),
+      ipAddress: clientIp,
       targetResource: '/api/auth/login',
-      details: { auth_method: 'local_credentials', app_code: 'apex' }
+      details: {
+        auth_method: 'local_credentials',
+        app_code: 'apex',
+        is_ad_user: isAdUser,
+        must_change_password: mustChangePassword
+      }
     });
 
     res.setHeader(
@@ -302,16 +462,117 @@ router.post('/api/auth/login', async (req, res) => {
     res.json({
       status: 'ok',
       message: `เข้าสู่ระบบสำเร็จในชื่อ ${userRecord.name}`,
+      must_change_password: mustChangePassword,
+      password_expired: passwordExpired,
+      password_days_left: daysLeft,
       user: {
         id: userRecord.id,
         uid: userRecord.uid || userRecord.id,
         name: userRecord.name,
         email: userRecord.email,
-        role: userRecord.role
+        role: userRecord.role,
+        use_ad_auth: isAdUser
       }
     });
   } catch (err) {
     res.status(500).json({ error: 'login_error', message: err.message });
+  }
+});
+
+/**
+ * Enterprise Local Account Password Change API (Spec v2.12.0 หมวด G.4.A/B)
+ * Enforces 8-16 characters complexity and updates password_changed_at (valid for 90 days).
+ * STRICT RULE: Only local accounts or local admin may use this. AD accounts are forbidden.
+ */
+router.post('/api/auth/local/change-password', async (req, res) => {
+  try {
+    if (!req.apexAuthenticated || !req.apexUser) {
+      return res.status(401).json({ error: 'unauthorized', message: 'กรุณาเข้าสู่ระบบก่อนเปลี่ยนรหัสผ่าน' });
+    }
+    const { old_password, new_password } = req.body || {};
+    if (!old_password || !new_password) {
+      return res.status(400).json({
+        error: 'missing_fields',
+        message: 'กรุณากรอกรหัสผ่านเดิมและรหัสผ่านใหม่ให้ครบถ้วน'
+      });
+    }
+
+    const users = await db.getCollection('users');
+    const userRecord = users.find(u => u.id === req.apexUser.id);
+    if (!userRecord) {
+      return res.status(404).json({ error: 'user_not_found', message: 'ไม่พบบัญชีผู้ใช้' });
+    }
+
+    // MANDATORY RULE: AD accounts cannot change local password here
+    const isAdUser = userRecord.use_ad_auth === true || (userRecord.use_ad_auth === undefined && userRecord.kind !== 'external');
+    if (isAdUser && userRecord.id !== 'U01') {
+      return res.status(403).json({
+        error: 'ad_account_forbidden',
+        message: 'บัญชี Active Directory ไม่ได้รับอนุญาตให้เปลี่ยนรหัสผ่านท้องถิ่น กรุณาเปลี่ยนผ่าน Windows หรือ Central IAM Portal'
+      });
+    }
+
+    const s = await db.getSystemSettings();
+    let oldValid = false;
+    if (userRecord.password_hash) {
+      oldValid = db.verifyPassword(String(old_password), userRecord.password_hash);
+    } else if (userRecord.id === 'U01' && s.admin_password_hash) {
+      oldValid = db.verifyPassword(String(old_password), s.admin_password_hash);
+    }
+
+    if (!oldValid) {
+      return res.status(400).json({ error: 'invalid_old_password', message: 'รหัสผ่านเดิมไม่ถูกต้อง' });
+    }
+
+    // Complexity check: 8-16 chars, Uppercase, Lowercase, Digit, Special char, No username
+    const complexityErr = validatePasswordComplexity(String(new_password).trim(), userRecord.name || userRecord.id);
+    if (complexityErr) {
+      return res.status(400).json({ error: 'complexity_violation', message: complexityErr });
+    }
+
+    const newHash = db.hashPassword(String(new_password).trim());
+    const nowIso = new Date().toISOString();
+
+    if (userRecord.id === 'U01') {
+      await db.updateSystemSettings({ admin_password_hash: newHash }, userRecord.id);
+    }
+
+    await db.updateDoc(
+      'users',
+      userRecord.id,
+      {
+        password_hash: newHash,
+        password_changed_at: nowIso,
+        must_change_password: false
+      },
+      userRecord.id
+    );
+
+    // Update active session flag
+    const cookies = parseCookies(req.headers.cookie || '');
+    if (cookies.apex_session && ssoSessions.has(cookies.apex_session)) {
+      const sess = ssoSessions.get(cookies.apex_session);
+      sess.mustChangePassword = false;
+    }
+
+    await db.insertAuditLog({
+      eventCode: 'PW_CHANGE',
+      actorId: userRecord.id,
+      actorEmail: userRecord.email || '',
+      actorRole: userRecord.role,
+      ipAddress: getClientIp(req),
+      targetResource: `users/${userRecord.id}`,
+      details: { action: 'local_password_rotated_90_days', days_valid: 90 }
+    });
+
+    res.json({
+      status: 'ok',
+      message: 'เปลี่ยนรหัสผ่านเรียบร้อยแล้ว (มีผลบังคับใช้ 90 วันตามมาตรฐาน ISO 27001)',
+      password_changed_at: nowIso,
+      must_change_password: false
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'change_password_error', message: err.message });
   }
 });
 
@@ -568,6 +829,11 @@ router.post('/api/auth/sso/logout', async (req, res) => {
     if (cookies.apex_session) {
       ssoSessions.delete(cookies.apex_session);
     }
+    const s = await db.getSystemSettings();
+    const isAdUser = req.apexUser
+      ? (req.apexUser.use_ad_auth === true || (req.apexUser.use_ad_auth === undefined && req.apexUser.kind !== 'external'))
+      : true;
+
     await db.insertAuditLog({
       eventCode: 'SSO-03',
       actorId: req.apexUser?.id || 'unknown',
@@ -575,10 +841,16 @@ router.post('/api/auth/sso/logout', async (req, res) => {
       actorRole: req.apexUser?.role || '',
       ipAddress: getClientIp(req),
       targetResource: '/api/auth/sso/logout',
-      details: { action: 'user_logout' }
+      details: { action: 'user_logout', is_ad_user: isAdUser }
     });
     res.setHeader('Set-Cookie', 'apex_session=; Path=/; HttpOnly; Max-Age=0');
-    res.json({ status: 'ok', redirect_uri: '/auth/start' });
+
+    // Spec v2.12.0 ข้อ 5.3: SSO user -> redirect to Central IAM Portal; Local user -> redirect to /login
+    const redirectUri = isAdUser
+      ? (s.ciam_portal_url || 'https://ciam.windowasia.com/portal')
+      : '/login';
+
+    res.json({ status: 'ok', redirect_uri: redirectUri });
   } catch (err) {
     res.status(500).json({ error: 'logout_error', message: err.message });
   }
@@ -732,6 +1004,91 @@ router.put('/api/v1/directory/accounts/:id', verifyCiamManagementAuth, async (re
   res.json({ status: 'updated', account: updated });
 });
 
+/**
+ * Spec v2.12.0 หมวด C.3 & D.7:
+ * 1-Click Offboarding & Reactivate via Central Identity Management
+ * Enforces CIAM Authority Lock (`is_status_locked`) and immediate session revocation.
+ */
+router.patch('/api/v1/directory/accounts/:username/status', verifyCiamManagementAuth, async (req, res) => {
+  try {
+    const targetUsername = String(req.params.username || '').trim();
+    const users = await db.getCollection('users');
+    const existing = users.find(
+      u =>
+        String(u.id || '').toLowerCase() === targetUsername.toLowerCase() ||
+        String(u.uid || '').toLowerCase() === targetUsername.toLowerCase() ||
+        (u.email && u.email.toLowerCase() === targetUsername.toLowerCase())
+    );
+
+    if (!existing) {
+      return res.status(404).json({ error: 'account_not_found', message: `ไม่พบบัญชี ${targetUsername}` });
+    }
+
+    const { is_active, reason, force_override } = req.body || {};
+    if (typeof is_active !== 'boolean') {
+      return res.status(400).json({ error: 'invalid_status', message: 'กรุณาระบุ is_active เป็น boolean' });
+    }
+
+    // CIAM Authority Lock Standard (Spec v2.12.0 หมวด D.7.4)
+    if (existing.is_status_locked === true && !force_override) {
+      await db.insertAuditLog({
+        eventCode: 'SPOKE_OVERRIDE_REJECTED',
+        actorId: 'CIAM-HUB',
+        ipAddress: getClientIp(req),
+        targetResource: `users/${existing.id}`,
+        details: { reason: 'account_status_locked_by_central_authority', requested_active: is_active }
+      });
+      return res.status(409).json({
+        error: 'status_locked',
+        message: 'บัญชีนี้ถูกล็อคสิทธิ์เด็ดขาดโดย Central IAM (is_status_locked: true) ไม่สามารถแก้ไขได้'
+      });
+    }
+
+    const updated = await db.updateDoc(
+      'users',
+      existing.id,
+      {
+        active: is_active,
+        status_origin: 'CIAM',
+        status_updated_at: new Date().toISOString()
+      },
+      'ciam-patch'
+    );
+
+    // If account deactivated, revoke all active sessions immediately (Spec C.3 & SSO-04)
+    if (!is_active) {
+      for (const [sessId, sess] of ssoSessions.entries()) {
+        if (sess.userId === existing.id || sess.uid === existing.uid) {
+          ssoSessions.delete(sessId);
+        }
+      }
+    }
+
+    await db.insertAuditLog({
+      eventCode: is_active ? 'DIR-REACTIVATE' : 'SSO-04',
+      actorId: 'CIAM-HUB',
+      actorEmail: existing.email || '',
+      actorRole: existing.role,
+      ipAddress: getClientIp(req),
+      targetResource: `users/${existing.id}`,
+      details: {
+        action: is_active ? 'account_reactivated' : '1_click_offboard',
+        reason: reason || '1-Click Offboarding via Central Identity Management',
+        is_active
+      }
+    });
+
+    res.json({
+      username: existing.id,
+      is_active,
+      message: `Account status updated to ${is_active}`,
+      updated_at: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'status_update_error', message: err.message });
+  }
+});
+
 // ============================================================================
 // GROUP D: Spoke Pull Agent Heartbeat & Immediate Sync + Audit Logs Viewer
 // ============================================================================
@@ -777,5 +1134,9 @@ router.get('/api/v1/audit/logs', async (req, res) => {
     res.status(500).json({ error: 'audit_log_error', message: err.message });
   }
 });
+
+router.validatePasswordComplexity = validatePasswordComplexity;
+router.checkPasswordExpiry90Days = checkPasswordExpiry90Days;
+router.LOCAL_PASSWORD_EXPIRY_DAYS = LOCAL_PASSWORD_EXPIRY_DAYS;
 
 module.exports = router;
