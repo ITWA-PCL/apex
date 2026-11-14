@@ -1,7 +1,7 @@
 /**
  * APEX (apex.windowasia.com) - Progressive Web App Service Worker
  */
-const CACHE_NAME = 'apex-pwa-v1';
+const CACHE_NAME = 'apex-pwa-v2';
 const APP_SHELL = ['/', '/manifest.json', '/icon.svg', '/js/apex-cloud-bridge.js', '/js/ciam-admin-panel.js'];
 
 self.addEventListener('install', event => {
@@ -20,8 +20,12 @@ self.addEventListener('activate', event => {
 
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
-  // Never cache API or SSE requests
-  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/auth/')) {
+  // Never cache API, Auth, or OAuth callback requests
+  if (
+    url.pathname.startsWith('/api/') ||
+    url.pathname.startsWith('/auth/') ||
+    url.searchParams.has('code')
+  ) {
     return;
   }
   event.respondWith(

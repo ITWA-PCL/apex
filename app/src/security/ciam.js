@@ -609,7 +609,25 @@ router.post('/api/auth/local/change-password', async (req, res) => {
 });
 
 // RFC 9700 Seamless Bounce Entry Point
+function clearApexSessionCookie(req, res) {
+  const cookies = parseCookies(req?.headers?.cookie || '');
+  const existingToken = cookies.apex_session;
+  const existingSession = existingToken ? ssoSessions.get(existingToken) : null;
+  if (existingToken) {
+    ssoSessions.delete(existingToken);
+  }
+  if (res && typeof res.setHeader === 'function') {
+    res.setHeader('Set-Cookie', 'apex_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+  }
+  return existingSession;
+}
+
 router.get('/auth/start', async (req, res) => {
+  clearApexSessionCookie(req, res);
+  if (req.query?.code && req.query?.state) {
+    const qs = new URLSearchParams(req.query).toString();
+    return res.redirect(`/api/auth/sso/callback?${qs}`);
+  }
   const s = await db.getSystemSettings();
   if (s.ciam_enabled === 'true') {
     return res.redirect('/api/auth/sso/login');
@@ -619,6 +637,7 @@ router.get('/auth/start', async (req, res) => {
 
 router.get('/api/auth/sso/login', async (req, res) => {
   try {
+    clearApexSessionCookie(req, res);
     const s = await db.getSystemSettings();
     const baseIssuer =
       s.break_glass_enabled === 'true'
@@ -628,9 +647,11 @@ router.get('/api/auth/sso/login', async (req, res) => {
     const codeVerifier = crypto.randomBytes(32).toString('base64url');
     const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
     const state = crypto.randomBytes(16).toString('hex');
+    const redirectUri = s.ciam_redirect_uri || 'https://apex.windowasia.com/api/auth/sso/callback';
 
     pkceStore.set(state, {
       codeVerifier,
+      redirectUri,
       createdAt: Date.now(),
       returnTo: req.query.return_to || '/'
     });
@@ -638,24 +659,26 @@ router.get('/api/auth/sso/login', async (req, res) => {
     const params = new URLSearchParams({
       response_type: 'code',
       client_id: s.ciam_client_id || 'apex-spoke-client',
-      redirect_uri: s.ciam_redirect_uri || 'https://apex.windowasia.com/api/auth/sso/callback',
+      redirect_uri: redirectUri,
       scope: 'openid profile email roles',
       state,
       code_challenge: codeChallenge,
       code_challenge_method: 'S256'
     });
 
-    res.redirect(`${baseIssuer}/oauth2/authorize?${params.toString()}`);
+    res.redirect(`${baseIssuer}/oauth/authorize?${params.toString()}`);
   } catch (err) {
     res.status(500).json({ error: 'sso_login_error', message: err.message });
   }
 });
 
-router.get('/api/auth/sso/callback', async (req, res) => {
+async function handleSsoCallback(req, res) {
   try {
-    const { code, state } = req.query;
-    const pkce = state ? pkceStore.get(String(state)) : null;
-    if (state) pkceStore.delete(String(state));
+    clearApexSessionCookie(req, res);
+    const { code, state } = req.query || {};
+    const stateStr = state ? String(state) : '';
+    const pkce = stateStr ? pkceStore.get(stateStr) : null;
+    if (stateStr) pkceStore.delete(stateStr);
 
     const s = await db.getSystemSettings();
     const ssoActive = s.ciam_enabled === 'true' || s.break_glass_enabled === 'true';
@@ -673,7 +696,8 @@ router.get('/api/auth/sso/callback', async (req, res) => {
     }
 
     const pkceValid = Boolean(pkce && pkce.codeVerifier && Date.now() - pkce.createdAt <= 10 * 60 * 1000);
-    if (!code || !state || !pkceValid) {
+    const isPortalDirectLaunch = Boolean(stateStr && stateStr.startsWith('ciam_launch_'));
+    if (!code || !stateStr || (!pkceValid && !isPortalDirectLaunch)) {
       await db.insertAuditLog({
         eventCode: 'SSO-02',
         ipAddress: getClientIp(req),
@@ -694,38 +718,72 @@ router.get('/api/auth/sso/callback', async (req, res) => {
         ? (s.break_glass_url || 'http://172.18.0.1:3100').replace(/\/+$/, '')
         : (s.ciam_issuer_url || 'https://ciam.windowasia.com').replace(/\/+$/, '');
 
-    // Exchange authorization code + PKCE code_verifier with Central IAM token endpoint
-    const tokenParams = new URLSearchParams({
-      grant_type: 'authorization_code',
-      code: String(code),
-      redirect_uri: s.ciam_redirect_uri || 'https://apex.windowasia.com/api/auth/sso/callback',
-      client_id: s.ciam_client_id || 'apex-spoke-client',
-      client_secret: s.ciam_client_secret,
-      code_verifier: pkce.codeVerifier
-    });
+    const appDomain = (s.app_domain || 'https://apex.windowasia.com').replace(/\/+$/, '');
+    const reqPath = String(req.path || '');
+    const origPath = String(req.query?._sso_orig_path || '');
+    const primaryRedirectUri =
+      pkce?.redirectUri ||
+      (reqPath === '/auth/callback'
+        ? `${appDomain}/auth/callback`
+        : origPath === '/'
+          ? appDomain
+          : (s.ciam_redirect_uri || `${appDomain}/api/auth/sso/callback`));
+
+    const redirectCandidates = pkceValid
+      ? [primaryRedirectUri]
+      : [...new Set([
+          primaryRedirectUri,
+          s.ciam_redirect_uri,
+          `${appDomain}/api/auth/sso/callback`,
+          `${appDomain}/auth/callback`,
+          appDomain,
+          `${appDomain}/`
+        ].filter(Boolean))];
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 6000);
+    const timer = setTimeout(() => controller.abort(), 8000);
     let verifiedEmail = '';
     let verifiedSub = '';
+    let verifiedName = '';
+    let verifiedRole = '';
+    let verifiedDept = '';
     let verifiedCiamOriginIp = CIAM_ORIGIN_IP;
     try {
-      const tokenResp = await fetch(`${baseIssuer}/oauth2/token`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Accept: 'application/json'
-        },
-        body: tokenParams.toString(),
-        signal: controller.signal
-      });
-      if (!tokenResp.ok) {
+      let tokenResp = null;
+      for (const candidateRedirect of redirectCandidates) {
+        const tokenParams = new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: String(code),
+          redirect_uri: candidateRedirect,
+          client_id: s.ciam_client_id || 'apex-spoke-client',
+          client_secret: s.ciam_client_secret
+        });
+        if (pkce?.codeVerifier) {
+          tokenParams.set('code_verifier', pkce.codeVerifier);
+        }
+
+        tokenResp = await fetch(`${baseIssuer}/api/v1/oauth/token`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Accept: 'application/json'
+          },
+          body: tokenParams.toString(),
+          signal: controller.signal
+        });
+
+        if (tokenResp.ok || tokenResp.status !== 400 || pkceValid) {
+          break;
+        }
+      }
+
+      if (!tokenResp || !tokenResp.ok) {
         clearTimeout(timer);
         await db.insertAuditLog({
           eventCode: 'SSO-02',
           ipAddress: getClientIp(req),
           targetResource: '/api/auth/sso/callback',
-          details: { reason: 'token_exchange_failed', status: tokenResp.status }
+          details: { reason: 'token_exchange_failed', status: tokenResp ? tokenResp.status : 'no_response' }
         });
         return res.status(401).json({
           error: 'token_exchange_failed',
@@ -741,7 +799,7 @@ router.get('/api/auth/sso/callback', async (req, res) => {
         });
       }
 
-      const userInfoResp = await fetch(`${baseIssuer}/oauth2/userinfo`, {
+      const userInfoResp = await fetch(`${baseIssuer}/api/v1/oauth/userinfo`, {
         headers: {
           Authorization: `Bearer ${tokenData.access_token}`,
           Accept: 'application/json'
@@ -763,7 +821,16 @@ router.get('/api/auth/sso/callback', async (req, res) => {
       }
       const profile = await userInfoResp.json();
       verifiedEmail = String(profile.email || '').trim().toLowerCase();
-      verifiedSub = String(profile.sub || '').trim();
+      verifiedSub = String(profile.preferred_username || profile.username || profile.sub || '').trim();
+      verifiedName = String(profile.name || profile.full_name || verifiedSub || '').trim();
+      const rawRoles =
+        profile.roles && typeof profile.roles === 'object' && !Array.isArray(profile.roles)
+          ? (profile.roles[s.app_code || 'apex'] || profile.roles.admin || Object.values(profile.roles)[0] || '')
+          : (Array.isArray(profile.roles) ? profile.roles[0] : (profile.roles || ''));
+      verifiedRole = String(
+        profile.role || rawRoles || (Array.isArray(profile.groups) ? profile.groups[0] : '') || ''
+      ).trim();
+      verifiedDept = String(profile.department || '').trim();
       verifiedCiamOriginIp =
         String(profile.ciam_origin_ip || tokenData.ciam_origin_ip || CIAM_ORIGIN_IP).trim() || CIAM_ORIGIN_IP;
     } catch (netErr) {
@@ -788,24 +855,65 @@ router.get('/api/auth/sso/callback', async (req, res) => {
     }
 
     const users = await db.getCollection('users');
-    const userRecord = users.find(
-      u =>
-        (verifiedEmail && u.email && u.email.toLowerCase() === verifiedEmail) ||
-        (verifiedSub && (u.uid === verifiedSub || u.id === verifiedSub))
-    );
+    const subLower = verifiedSub.toLowerCase();
+    let userRecord = users.find(u => {
+      if (subLower) {
+        const ids = [u.uid, u.id, u.username, u.external_id]
+          .filter(Boolean)
+          .map(x => String(x).trim().toLowerCase());
+        if (ids.includes(subLower)) return true;
+      }
+      if (verifiedEmail && u.email) {
+        const uEmail = String(u.email).trim().toLowerCase();
+        if (uEmail === 'u01@windowasia.co.th' && subLower && subLower !== 'u01') {
+          return false;
+        }
+        if (uEmail === verifiedEmail) return true;
+      }
+      return false;
+    });
 
-    // Zero fallback to U01: account must exist in APEX directory
+    // JIT Auto-Provision verified AD/CIAM user if not yet in APEX users directory
     if (!userRecord) {
+      const newUserId = verifiedSub || verifiedEmail.split('@')[0];
+      const isCiamAdmin = ['SUPER_ADMIN', 'ADMIN', 'admin'].includes(verifiedRole) ||
+        ['super_admin', 'admin'].includes(verifiedRole.toLowerCase());
+      userRecord = {
+        id: newUserId,
+        uid: verifiedSub || newUserId,
+        username: verifiedSub || newUserId,
+        external_id: verifiedSub || newUserId,
+        name: verifiedName || verifiedSub || newUserId,
+        title: verifiedDept || (isCiamAdmin ? 'ผู้ดูแลระบบ (Central IAM)' : 'พนักงาน (Central IAM)'),
+        email: verifiedEmail || `${newUserId.toLowerCase()}@windowasia.com`,
+        role: isCiamAdmin ? 'admin' : 'viewer',
+        kind: 'internal',
+        use_ad_auth: true,
+        active: true,
+        is_active: true,
+        status_origin: 'CIAM',
+        projects: 'all',
+        grant: [],
+        deny: [],
+        createdAt: new Date().toISOString()
+      };
+      await db.setDoc('users', newUserId, userRecord, 'ciam-sso-jit');
       await db.insertAuditLog({
-        eventCode: 'SSO-02',
-        actorEmail: verifiedEmail,
-        ipAddress: getClientIp(req),
-        targetResource: '/api/auth/sso/callback',
-        details: { reason: 'account_not_provisioned', sub: verifiedSub }
-      });
-      return res.status(403).json({
-        error: 'account_not_provisioned',
-        message: 'บัญชีผู้ใช้งานนี้ยังไม่ได้รับสิทธิ์เข้าใช้งานในระบบ APEX'
+        eventCode: 'DIR-PROVISION',
+        actorId: newUserId,
+        actorEmail: userRecord.email,
+        actorRole: userRecord.role,
+        ipAddress: verifiedCiamOriginIp,
+        targetResource: `users/${newUserId}`,
+        details: {
+          reason: 'jit_oidc_auto_provision',
+          sub: verifiedSub,
+          email: verifiedEmail,
+          department: verifiedDept,
+          ciam_role: verifiedRole,
+          client_ip: getClientIp(req),
+          ciam_origin_ip: verifiedCiamOriginIp
+        }
       });
     }
 
@@ -837,6 +945,7 @@ router.get('/api/auth/sso/callback', async (req, res) => {
       userId: userRecord.id,
       uid: userRecord.uid || verifiedSub || userRecord.id,
       email: userRecord.email || verifiedEmail,
+      authMethod: 'ciam_sso',
       authenticatedAt: new Date().toISOString()
     });
 
@@ -848,8 +957,10 @@ router.get('/api/auth/sso/callback', async (req, res) => {
       ipAddress: verifiedCiamOriginIp,
       targetResource: '/api/auth/sso/callback',
       details: {
-        pkce_verified: true,
+        pkce_verified: pkceValid,
+        portal_direct_launch: isPortalDirectLaunch,
         app_code: 'apex',
+        sub: verifiedSub,
         client_ip: getClientIp(req),
         ciam_origin_ip: verifiedCiamOriginIp
       }
@@ -859,44 +970,54 @@ router.get('/api/auth/sso/callback', async (req, res) => {
       'Set-Cookie',
       `apex_session=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800`
     );
-    res.redirect(pkce.returnTo || '/');
+    res.redirect((pkce && pkce.returnTo) || '/');
   } catch (err) {
     res.status(500).json({ error: 'callback_error', message: err.message });
   }
-});
+}
 
-router.post('/api/auth/sso/logout', async (req, res) => {
+router.get('/api/auth/sso/callback', handleSsoCallback);
+router.get('/auth/callback', handleSsoCallback);
+
+async function handleSsoLogout(req, res) {
   try {
-    const cookies = parseCookies(req.headers.cookie || '');
-    if (cookies.apex_session) {
-      ssoSessions.delete(cookies.apex_session);
-    }
+    const sess = clearApexSessionCookie(req, res);
     const s = await db.getSystemSettings();
     const isAdUser = req.apexUser
       ? (req.apexUser.use_ad_auth === true || (req.apexUser.use_ad_auth === undefined && req.apexUser.kind !== 'external'))
       : true;
+    const shouldRedirectToCiam = Boolean(sess?.authMethod === 'ciam_sso' || s.ciam_enabled === 'true' || isAdUser);
 
     await db.insertAuditLog({
       eventCode: 'SSO-03',
-      actorId: req.apexUser?.id || 'unknown',
-      actorEmail: req.apexUser?.email || '',
+      actorId: req.apexUser?.id || sess?.userId || 'unknown',
+      actorEmail: req.apexUser?.email || sess?.email || '',
       actorRole: req.apexUser?.role || '',
       ipAddress: getCiamOriginIp(req, { verifiedCiamFlow: true }),
       targetResource: '/api/auth/sso/logout',
-      details: { action: 'user_logout', is_ad_user: isAdUser, client_ip: getClientIp(req) }
+      details: {
+        action: 'user_logout',
+        is_ad_user: isAdUser,
+        auth_method: sess?.authMethod || 'local',
+        client_ip: getClientIp(req)
+      }
     });
-    res.setHeader('Set-Cookie', 'apex_session=; Path=/; HttpOnly; Max-Age=0');
 
-    // Spec v2.12.0 ข้อ 5.3: SSO user -> redirect to Central IAM Portal; Local user -> redirect to /login
-    const redirectUri = isAdUser
+    const redirectUri = shouldRedirectToCiam
       ? (s.ciam_portal_url || 'https://ciam.windowasia.com/portal')
       : '/login';
 
+    if (req.method === 'GET') {
+      return res.redirect(redirectUri);
+    }
     res.json({ status: 'ok', redirect_uri: redirectUri });
   } catch (err) {
     res.status(500).json({ error: 'logout_error', message: err.message });
   }
-});
+}
+
+router.post('/api/auth/sso/logout', handleSsoLogout);
+router.get('/api/auth/sso/logout', handleSsoLogout);
 
 router.post('/api/auth/sso/break-glass', async (req, res) => {
   try {
