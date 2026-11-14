@@ -92,7 +92,7 @@ const DEFAULT_SYSTEM_SETTINGS = {
   ciam_post_logout_redirect_uri: 'https://apex.windowasia.com/auth/start',
   ciam_portal_url: 'https://ciam.windowasia.com/portal',
   ciam_management_api_key: '',
-  ciam_allowed_ips: '157.173.219.153,127.0.0.1,::1',
+  ciam_allowed_ips: '157.173.219.153,172.18.0.1,127.0.0.1,::1',
   break_glass_enabled: 'false',
   break_glass_url: 'http://172.18.0.1:3100',
   ai_copilot_enabled: 'true',
