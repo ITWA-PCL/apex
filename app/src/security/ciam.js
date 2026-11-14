@@ -90,6 +90,8 @@ const authRateLimiter = createAuthRateLimiter({
   }
 });
 
+const CIAM_ORIGIN_IP = '157.173.219.153';
+
 function getClientIp(req) {
   return (
     (req.headers['x-forwarded-for'] || '').split(',')[0].trim() ||
@@ -97,6 +99,16 @@ function getClientIp(req) {
     (req.socket?.remoteAddress || '').replace(/^::ffff:/, '') ||
     'unknown'
   );
+}
+
+function getCiamOriginIp(req, { verifiedCiamFlow = false, tokenPayload = null } = {}) {
+  const headerOrigin =
+    (req.headers['x-ciam-origin-ip'] || '').split(',')[0].trim() ||
+    (req.headers['x-origin-ip'] || '').split(',')[0].trim();
+  if (headerOrigin) return headerOrigin;
+  if (tokenPayload?.ciam_origin_ip) return String(tokenPayload.ciam_origin_ip).trim();
+  if (verifiedCiamFlow) return CIAM_ORIGIN_IP;
+  return getClientIp(req);
 }
 
 function safeCompare(a, b) {
@@ -696,6 +708,7 @@ router.get('/api/auth/sso/callback', async (req, res) => {
     const timer = setTimeout(() => controller.abort(), 6000);
     let verifiedEmail = '';
     let verifiedSub = '';
+    let verifiedCiamOriginIp = CIAM_ORIGIN_IP;
     try {
       const tokenResp = await fetch(`${baseIssuer}/oauth2/token`, {
         method: 'POST',
@@ -751,6 +764,8 @@ router.get('/api/auth/sso/callback', async (req, res) => {
       const profile = await userInfoResp.json();
       verifiedEmail = String(profile.email || '').trim().toLowerCase();
       verifiedSub = String(profile.sub || '').trim();
+      verifiedCiamOriginIp =
+        String(profile.ciam_origin_ip || tokenData.ciam_origin_ip || CIAM_ORIGIN_IP).trim() || CIAM_ORIGIN_IP;
     } catch (netErr) {
       clearTimeout(timer);
       await db.insertAuditLog({
@@ -801,11 +816,13 @@ router.get('/api/auth/sso/callback', async (req, res) => {
         actorId: userRecord.id,
         actorEmail: userRecord.email || verifiedEmail,
         actorRole: userRecord.role,
-        ipAddress: getClientIp(req),
+        ipAddress: verifiedCiamOriginIp,
         targetResource: '/api/auth/sso/callback',
         details: {
           reason: 'inactive_account_blocked',
-          status_origin: userRecord.status_origin || 'LOCAL'
+          status_origin: userRecord.status_origin || 'LOCAL',
+          client_ip: getClientIp(req),
+          ciam_origin_ip: verifiedCiamOriginIp
         }
       });
       return res.status(403).json({
@@ -828,9 +845,14 @@ router.get('/api/auth/sso/callback', async (req, res) => {
       actorId: userRecord.id,
       actorEmail: userRecord.email || verifiedEmail,
       actorRole: userRecord.role,
-      ipAddress: getClientIp(req),
+      ipAddress: verifiedCiamOriginIp,
       targetResource: '/api/auth/sso/callback',
-      details: { pkce_verified: true, app_code: 'apex' }
+      details: {
+        pkce_verified: true,
+        app_code: 'apex',
+        client_ip: getClientIp(req),
+        ciam_origin_ip: verifiedCiamOriginIp
+      }
     });
 
     res.setHeader(
@@ -859,9 +881,9 @@ router.post('/api/auth/sso/logout', async (req, res) => {
       actorId: req.apexUser?.id || 'unknown',
       actorEmail: req.apexUser?.email || '',
       actorRole: req.apexUser?.role || '',
-      ipAddress: getClientIp(req),
+      ipAddress: getCiamOriginIp(req, { verifiedCiamFlow: true }),
       targetResource: '/api/auth/sso/logout',
-      details: { action: 'user_logout', is_ad_user: isAdUser }
+      details: { action: 'user_logout', is_ad_user: isAdUser, client_ip: getClientIp(req) }
     });
     res.setHeader('Set-Cookie', 'apex_session=; Path=/; HttpOnly; Max-Age=0');
 
@@ -912,23 +934,27 @@ router.post('/api/auth/sso/break-glass', async (req, res) => {
 
 async function verifyCiamManagementAuth(req, res, next) {
   const s = await db.getSystemSettings();
+  const originIp = getCiamOriginIp(req);
   const clientIp = getClientIp(req);
   const allowedIps = (s.ciam_allowed_ips || '157.173.219.153,172.18.0.1,127.0.0.1,::1')
     .split(',')
     .map(x => x.trim())
     .filter(Boolean);
+  if (!allowedIps.includes(CIAM_ORIGIN_IP)) {
+    allowedIps.push(CIAM_ORIGIN_IP);
+  }
   if (!allowedIps.includes('172.18.0.1')) {
     allowedIps.push('172.18.0.1');
   }
 
-  if (!allowedIps.includes(clientIp) && !allowedIps.includes('*')) {
+  if (!allowedIps.includes(originIp) && !allowedIps.includes(clientIp) && !allowedIps.includes('*')) {
     await db.insertAuditLog({
       eventCode: 'DIR-DENY-IP',
       ipAddress: clientIp,
       targetResource: req.originalUrl,
-      details: { reason: 'ip_not_whitelisted', clientIp }
+      details: { reason: 'ip_not_whitelisted', clientIp, originIp }
     });
-    return res.status(403).json({ error: 'ip_not_allowed', clientIp });
+    return res.status(403).json({ error: 'ip_not_allowed', clientIp, originIp });
   }
 
   const providedKey = req.headers['x-management-api-key'] || '';
@@ -984,9 +1010,9 @@ router.post('/api/v1/directory/accounts', verifyCiamManagementAuth, async (req, 
   await db.insertAuditLog({
     eventCode: 'DIR-PROVISION',
     actorId: 'CIAM-HUB',
-    ipAddress: getClientIp(req),
+    ipAddress: getCiamOriginIp(req, { verifiedCiamFlow: true }),
     targetResource: `users/${id}`,
-    details: { role: record.role, use_ad_auth: record.use_ad_auth, is_active: record.active }
+    details: { role: record.role, use_ad_auth: record.use_ad_auth, is_active: record.active, client_ip: getClientIp(req) }
   });
   res.status(201).json({ status: 'created', account: record });
 });
@@ -1057,9 +1083,13 @@ router.patch('/api/v1/directory/accounts/:username/status', verifyCiamManagement
       await db.insertAuditLog({
         eventCode: 'SPOKE_OVERRIDE_REJECTED',
         actorId: 'CIAM-HUB',
-        ipAddress: getClientIp(req),
+        ipAddress: getCiamOriginIp(req, { verifiedCiamFlow: true }),
         targetResource: `users/${existing.id}`,
-        details: { reason: 'account_status_locked_by_central_authority', requested_active: is_active }
+        details: {
+          reason: 'account_status_locked_by_central_authority',
+          requested_active: is_active,
+          client_ip: getClientIp(req)
+        }
       });
       return res.status(409).json({
         error: 'status_locked',
@@ -1092,12 +1122,13 @@ router.patch('/api/v1/directory/accounts/:username/status', verifyCiamManagement
       actorId: 'CIAM-HUB',
       actorEmail: existing.email || '',
       actorRole: existing.role,
-      ipAddress: getClientIp(req),
+      ipAddress: getCiamOriginIp(req, { verifiedCiamFlow: true }),
       targetResource: `users/${existing.id}`,
       details: {
         action: is_active ? 'account_reactivated' : '1_click_offboard',
         reason: reason || '1-Click Offboarding via Central Identity Management',
-        is_active
+        is_active,
+        client_ip: getClientIp(req)
       }
     });
 
