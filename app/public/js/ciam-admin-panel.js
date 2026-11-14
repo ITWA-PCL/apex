@@ -630,10 +630,31 @@
     });
 
     topbar.querySelector('#btnTopLogout')?.addEventListener('click', async () => {
-      await fetch('/api/auth/sso/logout', { method: 'POST' });
+      const clearActAs = () => {
+        try {
+          sessionStorage.removeItem('actAs');
+        } catch (_) {}
+      };
+      const portalFallback = ciamSettings?.ciam_portal_url || 'https://ciam.windowasia.com/portal';
       try {
-        sessionStorage.removeItem('actAs');
-      } catch (_) {}
+        const res = await fetch('/api/auth/sso/logout', { method: 'POST' });
+        const out = await res.json().catch(() => null);
+        clearActAs();
+        if (out?.redirect_uri && out.redirect_uri !== '/login') {
+          window.location.href = out.redirect_uri;
+          return;
+        }
+        if (sessionInfo?.ciam_enabled) {
+          window.location.href = portalFallback;
+          return;
+        }
+      } catch (_) {
+        clearActAs();
+        if (sessionInfo?.ciam_enabled) {
+          window.location.href = portalFallback;
+          return;
+        }
+      }
       window.location.reload();
     });
   }
@@ -972,6 +993,15 @@
   }
 
   window.addEventListener('DOMContentLoaded', async () => {
+    const searchParams = new URLSearchParams(window.location.search || '');
+    if (
+      searchParams.has('code') &&
+      searchParams.has('state') &&
+      !window.location.pathname.startsWith('/api/auth/sso/callback')
+    ) {
+      window.location.replace('/api/auth/sso/callback' + window.location.search);
+      return;
+    }
     injectSecurityStyles();
     await fetchSessionInfo();
     renderLoginOverlay();
