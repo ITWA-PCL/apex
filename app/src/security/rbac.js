@@ -201,6 +201,7 @@ async function resolveRequestUser(req, res, next) {
 const PUBLIC_API_PATHS = new Set([
   '/api/health',
   '/api/auth/session',
+  '/api/auth/sso/config',
   '/api/auth/login',
   '/api/auth/sso/login',
   '/api/auth/sso/callback',

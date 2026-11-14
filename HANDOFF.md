@@ -8,7 +8,7 @@
 
 ## Latest Handoff Status (จุดพักงานล่าสุด — พร้อมกลับมาทำต่อได้ทันที)
 
-- **วันที่ / เวลาบันทึกส่งมอบ:** `2026-11-13 22:50 (+07:00)`
+- **วันที่ / เวลาบันทึกส่งมอบ:** `2026-11-14 14:22 (+07:00)`
 - **ผู้ส่งมอบงานล่าสุด:** Lead Security & Core Architect (คุณ — Track A ร่วมกับ Antigravity AI)
 - **ชื่อโปรเจกต์หลัก:** **APEX** (`https://apex.windowasia.com` — ระบบควบคุมงานติดตั้งประตู-หน้าต่าง)
 - **โฟลเดอร์หลักของโปรเจกต์บนเครื่อง Local (ทั้งเครื่องคุณและเครื่อง CFO):** **`D:\Python\APEX`**
@@ -18,9 +18,13 @@
   - Branch งาน Security ล่าสุดของคุณ (Track A): **`Sec1`** (แตกจาก `origin/main` ล่าสุดที่ผสาน PR #1 สำเร็จแล้ว และอัปเกรดมาตรฐานความปลอดภัยตาม Central IAM Spoke Spec v2.12.0 เรียบร้อย)
   - Commit ล่าสุดบน `Sec1`: **`fad31f3`** (`feat(security): implement CIAM v2.12.0 90-day local password rotation, complexity, bot defense & authority lock`)
   - Remote Branch: **`origin/Sec1`** (Push สำเร็จเรียบร้อยแล้ว รอน้องโก้ตรวจ Security & CI ก่อนเปิด PR เข้า `main`)
+  - **แพตช์เพิ่มเติมที่ Commit & Push ขึ้น Sec1 ล่าสุด (รองรับ CIAM Health Check & Docker Bridge IP):**
+    - `app/src/security/rbac.js`: เพิ่ม `'/api/auth/sso/config'` ใน `PUBLIC_API_PATHS`
+    - `app/src/security/ciam.js`: เพิ่ม Endpoint `GET /api/auth/sso/config` (ส่ง `sso_enabled`, `break_glass_active`, `ciam_enabled`, `break_glass_enabled`, `issuer_url`, `client_id`) และรองรับ Docker Bridge IP `172.18.0.1` ร่วมกับ `157.173.219.153` ใน `verifyCiamManagementAuth`
+    - `app/src/db/postgres.js`: อัปเดตค่าเริ่มต้น `ciam_allowed_ips` เป็น `'157.173.219.153,172.18.0.1,127.0.0.1,::1'`
   - Branch ของ CFO (Track B): `feat/flow-cfo` (แตกจาก `main` ล่าสุดและเริ่มพัฒนาแล้ว)
   - Branch กลางของทีม: `main`
-- **สถานะการทดสอบ (Local Compile & Verification):** **ผ่าน 100% (`0 Errors`)** ด้วยคำสั่ง `node scripts/verify-local.js` บน Branch `Sec1`
+- **สถานะการทดสอบ (Local Compile & Verification):** **ผ่าน 100% (`0 Errors`)** ด้วยคำสั่ง `node scripts/verify-local.js` (หลังแก้ไข 3 ไฟล์ข้างต้น) บน Branch `Sec1`
 
 ---
 
@@ -52,7 +56,7 @@
    - ผ่านทั้ง Syntax Compile, Track A RBAC, Case-Insensitive Auth Gate, Password Migration, SSO Callback Hardening, AI Copilot Zero-Training, 8-Step Finance Engine, Deploy Hardening, Post-Login Scoping, Spec v2.12.0 Bot Defense & 90-Day Password Rotation, และ CIAM Authority Lock
 
 4. **Commit และ Push ขึ้น Git Remote เรียบร้อยแล้ว:**
-   - Commit `fad31f3` อยู่บน `origin/Sec1` เรียบร้อยแล้ว
+   - Commit `fad31f3` และแพตช์รองรับ CIAM Health Check (`/api/auth/sso/config` & Docker Bridge IP `172.18.0.1`) อยู่บน `origin/Sec1` เรียบร้อยแล้ว (ตัว CIAM ใหม่มี Fallback ไปเช็ก `/api/auth/session` อัตโนมัติและ Auto-heal คอลัมน์ `spoke_sso_status` หลัง Restart)
 
 ---
 

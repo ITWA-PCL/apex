@@ -285,6 +285,26 @@ router.get('/api/auth/session', async (req, res) => {
   }
 });
 
+// Public SSO Config probe endpoint (Spec Section B.1 - consumed by Central-IAM health check)
+router.get('/api/auth/sso/config', async (req, res) => {
+  try {
+    const s = await db.getSystemSettings();
+    const ssoEnabled = s.ciam_enabled === 'true';
+    const breakGlassActive = s.break_glass_enabled === 'true';
+    res.json({
+      app_code: s.app_code || 'apex',
+      sso_enabled: ssoEnabled,
+      ciam_enabled: ssoEnabled,
+      break_glass_active: breakGlassActive,
+      break_glass_enabled: breakGlassActive,
+      issuer_url: s.ciam_issuer_url || 'https://ciam.windowasia.com',
+      client_id: s.ciam_client_id || 'apex-spoke-client'
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'sso_config_error', message: err.message });
+  }
+});
+
 router.post('/api/auth/login', authRateLimiter, async (req, res) => {
   try {
     const { identifier, password, corporate_fax, security_honey, form_render_ts } = req.body || {};
@@ -893,10 +913,13 @@ router.post('/api/auth/sso/break-glass', async (req, res) => {
 async function verifyCiamManagementAuth(req, res, next) {
   const s = await db.getSystemSettings();
   const clientIp = getClientIp(req);
-  const allowedIps = (s.ciam_allowed_ips || '157.173.219.153,127.0.0.1,::1')
+  const allowedIps = (s.ciam_allowed_ips || '157.173.219.153,172.18.0.1,127.0.0.1,::1')
     .split(',')
     .map(x => x.trim())
     .filter(Boolean);
+  if (!allowedIps.includes('172.18.0.1')) {
+    allowedIps.push('172.18.0.1');
+  }
 
   if (!allowedIps.includes(clientIp) && !allowedIps.includes('*')) {
     await db.insertAuditLog({
