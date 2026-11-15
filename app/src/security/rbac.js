@@ -495,6 +495,9 @@ function sanitizeDocForResponse(collection, doc, user) {
   delete clone.invite_token_hash;
   delete clone.invite_otp_hash;
   delete clone.otp_code_hash;
+  delete clone.otp_password_verified_at;
+  delete clone.otp_password_verified_until;
+  delete clone.otp_challenge_token_hash;
 
   const canSeeFinance = Boolean(user?.permissions?.includes('fin'));
   if (!canSeeFinance && collection === 'projects') {

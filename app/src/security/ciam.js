@@ -135,6 +135,23 @@ function buildSessionCookie(req, sessionId, maxAgeSeconds = 28800) {
   return `apex_session=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secureFlag}`;
 }
 
+function buildOtpChallengeCookie(req, challengeToken, maxAgeSeconds = 600) {
+  const secureFlag = isHttpsRequest(req) ? '; Secure' : '';
+  return `apex_otp_challenge=${challengeToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secureFlag}`;
+}
+
+function clearOtpChallengeCookie(req) {
+  const secureFlag = isHttpsRequest(req) ? '; Secure' : '';
+  return `apex_otp_challenge=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureFlag}`;
+}
+
+function getPreAuthChallengeToken(req) {
+  const bodyToken = req.body?.pre_auth_token || req.body?.challenge_token;
+  const headerToken = req.headers?.['x-otp-challenge-token'];
+  const cookieToken = parseCookies(req.headers?.cookie).apex_otp_challenge;
+  return String(bodyToken || headerToken || cookieToken || '').trim();
+}
+
 function resolveRoleKeyFromCiam(roleInput, groupNameInput, fallbackRole = 'viewer') {
   const candidates = [roleInput, groupNameInput].filter(Boolean).map(v => String(v).trim());
   for (const raw of candidates) {
@@ -193,7 +210,7 @@ async function issueUserSession(
   req,
   res,
   userRecord,
-  { authMethod = 'local_credentials', mustChangePassword = false, settings = null } = {}
+  { authMethod = 'local_credentials', mustChangePassword = false, settings = null, extraCookies = [] } = {}
 ) {
   const s = settings || (await db.getSystemSettings());
   const nowIso = new Date().toISOString();
@@ -220,7 +237,11 @@ async function issueUserSession(
     userRecord.id
   );
 
-  res.setHeader('Set-Cookie', buildSessionCookie(req, sessionId, maxAgeSeconds));
+  const sessionCookie = buildSessionCookie(req, sessionId, maxAgeSeconds);
+  res.setHeader(
+    'Set-Cookie',
+    extraCookies.length > 0 ? [sessionCookie, ...extraCookies] : sessionCookie
+  );
   return { sessionId, sessionPayload, nowIso };
 }
 
@@ -710,6 +731,26 @@ router.post('/api/auth/login', authRateLimiter, async (req, res) => {
     }
 
     if (!passwordValid) {
+      if (
+        userRecord.otp_password_verified_until ||
+        userRecord.otp_challenge_token_hash ||
+        userRecord.otp_purpose === 'login_2fa'
+      ) {
+        await db.updateDoc(
+          'users',
+          userRecord.id,
+          {
+            otp_password_verified_at: null,
+            otp_password_verified_until: null,
+            otp_challenge_token_hash: null,
+            otp_code_hash: null,
+            otp_expires_at: null,
+            otp_attempts: 0,
+            otp_purpose: null
+          },
+          userRecord.id
+        );
+      }
       await db.insertAuditLog({
         eventCode: 'SSO-02',
         actorId: userRecord.id,
@@ -736,10 +777,25 @@ router.post('/api/auth/login', authRateLimiter, async (req, res) => {
 
     // Optional 2FA OTP Challenge for External or OTP-enabled Local Accounts
     if (!isAdUser && (userRecord.otp_enabled === true || (isExternal && s.login_otp_external === 'true'))) {
-      const challenge = await notifier.createAndSendOtpChallenge(userRecord, 'login_2fa', clientIp);
+      const nowIso = new Date().toISOString();
+      const pwdVerifiedUntil = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+      const preAuthToken = crypto.randomBytes(32).toString('hex');
+      const verifiedUser = await db.updateDoc(
+        'users',
+        userRecord.id,
+        {
+          otp_password_verified_at: nowIso,
+          otp_password_verified_until: pwdVerifiedUntil,
+          otp_challenge_token_hash: db.hashPassword(preAuthToken)
+        },
+        userRecord.id
+      );
+      const challenge = await notifier.createAndSendOtpChallenge(verifiedUser || userRecord, 'login_2fa', clientIp);
+      res.setHeader('Set-Cookie', buildOtpChallengeCookie(req, preAuthToken, 600));
       return res.json({
         status: 'otp_required',
         otp_required: true,
+        pre_auth_token: preAuthToken,
         identifier: userRecord.username || userRecord.id,
         masked_email: challenge.masked_email,
         expires_at: challenge.expires_at,
@@ -846,9 +902,65 @@ router.post('/api/auth/otp/request', authRateLimiter, async (req, res) => {
       });
     }
 
+    const rawPurpose =
+      purpose === undefined || purpose === null || purpose === ''
+        ? 'login_2fa'
+        : String(purpose).trim();
+    if (!['register', 'login_2fa'].includes(rawPurpose)) {
+      return res.status(400).json({
+        error: 'invalid_otp_purpose',
+        message: 'วัตถุประสงค์ของรหัส OTP ไม่ถูกต้อง (รองรับเฉพาะ register หรือ login_2fa)'
+      });
+    }
+
+    if (rawPurpose === 'register') {
+      const hasPendingInvite =
+        userRecord.registration_status === 'pending_invite' ||
+        Boolean(userRecord.invite_token_hash || userRecord.invite_otp_hash);
+      if (userRecord.password_hash && !hasPendingInvite) {
+        await db.insertAuditLog({
+          eventCode: 'OTP-FAIL',
+          actorId: userRecord.id,
+          actorEmail: userRecord.email || cleanId,
+          actorRole: userRecord.role,
+          ipAddress: clientIp,
+          targetResource: '/api/auth/otp/request',
+          details: { reason: 'register_otp_requested_for_already_registered_user' }
+        });
+        return res.status(403).json({
+          error: 'already_registered',
+          message: 'บัญชีนี้ตั้งรหัสผ่านแล้ว ไม่สามารถขอรหัส OTP สำหรับลงทะเบียนครั้งแรกได้'
+        });
+      }
+    } else {
+      const suppliedPreAuthToken = getPreAuthChallengeToken(req);
+      const pwdVerifiedOk =
+        Boolean(userRecord.password_hash) &&
+        Boolean(userRecord.otp_challenge_token_hash) &&
+        Boolean(suppliedPreAuthToken) &&
+        userRecord.otp_password_verified_until &&
+        new Date(userRecord.otp_password_verified_until).getTime() > Date.now() &&
+        db.verifyPassword(suppliedPreAuthToken, userRecord.otp_challenge_token_hash);
+      if (!pwdVerifiedOk) {
+        await db.insertAuditLog({
+          eventCode: 'OTP-FAIL',
+          actorId: userRecord.id,
+          actorEmail: userRecord.email || cleanId,
+          actorRole: userRecord.role,
+          ipAddress: clientIp,
+          targetResource: '/api/auth/otp/request',
+          details: { reason: 'password_not_verified_or_challenge_token_mismatch' }
+        });
+        return res.status(403).json({
+          error: 'password_verification_required',
+          message: 'กรุณายืนยันรหัสผ่านที่หน้าเข้าสู่ระบบจากอุปกรณ์เดียวกันให้ผ่านก่อนขอรหัส 2FA OTP'
+        });
+      }
+    }
+
     const challenge = await notifier.createAndSendOtpChallenge(
       userRecord,
-      purpose === 'register' ? 'register' : 'login_2fa',
+      rawPurpose,
       clientIp
     );
 
@@ -926,7 +1038,35 @@ router.post('/api/auth/register-first-time', authRateLimiter, async (req, res) =
       inviteNotExpired &&
       (db.verifyPassword(code, userRecord.invite_token_hash) ||
         db.verifyPassword(code, userRecord.invite_otp_hash));
-    const matchesOtp = otpNotExpired && db.verifyPassword(code, userRecord.otp_code_hash);
+    const matchesOtpHash = otpNotExpired && db.verifyPassword(code, userRecord.otp_code_hash);
+
+    if (!matchesInvite && matchesOtpHash && userRecord.otp_purpose !== 'register') {
+      await db.updateDoc(
+        'users',
+        userRecord.id,
+        { otp_attempts: Number(userRecord.otp_attempts || 0) + 1 },
+        userRecord.id
+      );
+      await db.insertAuditLog({
+        eventCode: 'OTP-FAIL',
+        actorId: userRecord.id,
+        actorEmail: userRecord.email || cleanId,
+        actorRole: userRecord.role,
+        ipAddress: clientIp,
+        targetResource: '/api/auth/register-first-time',
+        details: {
+          reason: 'otp_purpose_mismatch',
+          expected_purpose: 'register',
+          actual_purpose: userRecord.otp_purpose || null
+        }
+      });
+      return res.status(400).json({
+        error: 'otp_purpose_mismatch',
+        message: 'ห้ามนำรหัส OTP ที่ออกสำหรับวัตถุประสงค์อื่นมาใช้ตั้งรหัสผ่านครั้งแรก'
+      });
+    }
+
+    const matchesOtp = matchesOtpHash && userRecord.otp_purpose === 'register';
 
     if (!matchesInvite && !matchesOtp) {
       if (userRecord.otp_code_hash) {
@@ -952,6 +1092,22 @@ router.post('/api/auth/register-first-time', authRateLimiter, async (req, res) =
       });
     }
 
+    if (userRecord.password_hash && userRecord.registration_status !== 'pending_invite' && !matchesInvite) {
+      await db.insertAuditLog({
+        eventCode: 'OTP-FAIL',
+        actorId: userRecord.id,
+        actorEmail: userRecord.email || cleanId,
+        actorRole: userRecord.role,
+        ipAddress: clientIp,
+        targetResource: '/api/auth/register-first-time',
+        details: { reason: 'already_registered' }
+      });
+      return res.status(403).json({
+        error: 'already_registered',
+        message: 'บัญชีนี้ลงทะเบียนและตั้งรหัสผ่านแล้ว กรุณาเข้าสู่ระบบตามปกติ'
+      });
+    }
+
     const usernameForCheck = String(userRecord.username || userRecord.uid || userRecord.id).trim();
     const compErr = validatePasswordComplexity(pwd, usernameForCheck);
     if (compErr) {
@@ -973,7 +1129,10 @@ router.post('/api/auth/register-first-time', authRateLimiter, async (req, res) =
         otp_code_hash: null,
         otp_expires_at: null,
         otp_attempts: 0,
-        otp_purpose: null
+        otp_purpose: null,
+        otp_password_verified_at: null,
+        otp_password_verified_until: null,
+        otp_challenge_token_hash: null
       },
       userRecord.id
     );
@@ -1071,6 +1230,53 @@ router.post('/api/auth/otp/verify', authRateLimiter, async (req, res) => {
       return res.status(403).json({ error: 'account_inactive', message: 'บัญชีนี้ถูกระงับการใช้งาน (SSO-04)' });
     }
 
+    if (userRecord.otp_code_hash && userRecord.otp_purpose !== 'login_2fa') {
+      const nextAttempts = Number(userRecord.otp_attempts || 0) + 1;
+      await db.updateDoc('users', userRecord.id, { otp_attempts: nextAttempts }, userRecord.id);
+      await db.insertAuditLog({
+        eventCode: 'OTP-FAIL',
+        actorId: userRecord.id,
+        actorEmail: userRecord.email || cleanId,
+        actorRole: userRecord.role,
+        ipAddress: clientIp,
+        targetResource: '/api/auth/otp/verify',
+        details: {
+          reason: 'otp_purpose_mismatch',
+          expected_purpose: 'login_2fa',
+          actual_purpose: userRecord.otp_purpose || null,
+          attempts: nextAttempts
+        }
+      });
+      return res.status(400).json({
+        error: 'otp_purpose_mismatch',
+        message: 'รหัส OTP นี้ไม่ได้ออกสำหรับการยืนยันตัวตนเข้าสู่ระบบ (2FA) ห้ามใช้ผิดวัตถุประสงค์'
+      });
+    }
+
+    const suppliedPreAuthToken = getPreAuthChallengeToken(req);
+    const pwdVerifiedOk =
+      Boolean(userRecord.password_hash) &&
+      Boolean(userRecord.otp_challenge_token_hash) &&
+      Boolean(suppliedPreAuthToken) &&
+      userRecord.otp_password_verified_until &&
+      new Date(userRecord.otp_password_verified_until).getTime() > Date.now() &&
+      db.verifyPassword(suppliedPreAuthToken, userRecord.otp_challenge_token_hash);
+    if (!pwdVerifiedOk) {
+      await db.insertAuditLog({
+        eventCode: 'OTP-FAIL',
+        actorId: userRecord.id,
+        actorEmail: userRecord.email || cleanId,
+        actorRole: userRecord.role,
+        ipAddress: clientIp,
+        targetResource: '/api/auth/otp/verify',
+        details: { reason: 'password_not_verified_or_challenge_token_mismatch' }
+      });
+      return res.status(403).json({
+        error: 'password_verification_required',
+        message: 'กรุณายืนยันรหัสผ่านที่หน้าเข้าสู่ระบบจากอุปกรณ์เดียวกันให้ผ่านก่อนใช้รหัส 2FA OTP'
+      });
+    }
+
     if (
       !userRecord.otp_code_hash ||
       !userRecord.otp_expires_at ||
@@ -1107,7 +1313,15 @@ router.post('/api/auth/otp/verify', authRateLimiter, async (req, res) => {
     const clearedUser = await db.updateDoc(
       'users',
       userRecord.id,
-      { otp_code_hash: null, otp_expires_at: null, otp_attempts: 0, otp_purpose: null },
+      {
+        otp_code_hash: null,
+        otp_expires_at: null,
+        otp_attempts: 0,
+        otp_purpose: null,
+        otp_password_verified_at: null,
+        otp_password_verified_until: null,
+        otp_challenge_token_hash: null
+      },
       userRecord.id
     );
 
@@ -1125,7 +1339,8 @@ router.post('/api/auth/otp/verify', authRateLimiter, async (req, res) => {
     await issueUserSession(req, res, clearedUser, {
       authMethod: 'local_otp_2fa',
       mustChangePassword,
-      settings: s
+      settings: s,
+      extraCookies: [clearOtpChallengeCookie(req)]
     });
 
     await db.insertAuditLog({

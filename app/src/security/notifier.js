@@ -64,7 +64,7 @@ function buildInviteEmailContent({ name, username, registrationUrl, otp, appDoma
   return { subject: `[APEX] เชิญลงทะเบียนบัญชีผู้ใช้งานครั้งแรก (${username})`, text, html };
 }
 
-function sendSmtpMail({ host, port = 587, user, password, from, to, subject, text, html }) {
+function sendSmtpMail({ host, port = 587, user, password, from, to, subject, text, html, tlsOptions = {} }) {
   return new Promise((resolve, reject) => {
     const cleanHost = String(host || '').trim();
     const numericPort = parseInt(port, 10) || 587;
@@ -78,12 +78,19 @@ function sendSmtpMail({ host, port = 587, user, password, from, to, subject, tex
     }
 
     const useDirectTls = numericPort === 465;
+    let isTlsEncrypted = false;
     let socket = useDirectTls
-      ? tls.connect({ host: cleanHost, port: numericPort, servername: cleanHost })
+      ? tls.connect({
+          host: cleanHost,
+          port: numericPort,
+          servername: cleanHost,
+          rejectUnauthorized: tlsOptions.rejectUnauthorized !== false
+        })
       : net.createConnection({ host: cleanHost, port: numericPort });
 
     let settled = false;
     let buffer = '';
+    const pendingLines = [];
     let activeResolveResponse = null;
 
     const timer = setTimeout(() => {
@@ -107,18 +114,45 @@ function sendSmtpMail({ host, port = 587, user, password, from, to, subject, tex
         const lines = buffer.split(/\r?\n/);
         buffer = lines.pop() || '';
         for (const line of lines) {
-          if (/^\d{3} /.test(line) && activeResolveResponse) {
-            const code = parseInt(line.slice(0, 3), 10);
-            const resolver = activeResolveResponse;
-            activeResolveResponse = null;
-            resolver({ code, line });
+          if (/^\d{3} /.test(line)) {
+            const parsed = { code: parseInt(line.slice(0, 3), 10), line };
+            if (activeResolveResponse) {
+              const resolver = activeResolveResponse;
+              activeResolveResponse = null;
+              resolver(parsed);
+            } else {
+              pendingLines.push(parsed);
+            }
           }
         }
       });
       sock.on('error', err => finish(err));
     }
 
+    function waitForTlsHandshake(tlsSock) {
+      return new Promise((res, rej) => {
+        if (tlsSock.encrypted && !tlsSock.connecting && tlsSock.authorized !== false) {
+          isTlsEncrypted = true;
+          return res();
+        }
+        const onSecure = () => {
+          tlsSock.removeListener('error', onErr);
+          isTlsEncrypted = true;
+          res();
+        };
+        const onErr = err => {
+          tlsSock.removeListener('secureConnect', onSecure);
+          rej(err);
+        };
+        tlsSock.once('secureConnect', onSecure);
+        tlsSock.once('error', onErr);
+      });
+    }
+
     function readResponse() {
+      if (pendingLines.length > 0) {
+        return Promise.resolve(pendingLines.shift());
+      }
       return new Promise(res => {
         activeResolveResponse = res;
       });
@@ -143,19 +177,39 @@ function sendSmtpMail({ host, port = 587, user, password, from, to, subject, tex
     attachSocketListeners(socket);
 
     (async () => {
+      if (useDirectTls) {
+        await waitForTlsHandshake(socket);
+      }
+
       await sendCmd(null, [220]);
       await sendCmd(`EHLO apex.windowasia.com`, [250]);
 
-      if (!useDirectTls && numericPort === 587) {
+      if (!useDirectTls) {
         try {
           await sendCmd('STARTTLS', [220]);
-          socket = tls.connect({ socket, host: cleanHost, servername: cleanHost });
-          buffer = '';
-          attachSocketListeners(socket);
-          await sendCmd(`EHLO apex.windowasia.com`, [250]);
-        } catch (_) {
-          // Proceed if server does not advertise STARTTLS on internal relay
+        } catch (startTlsErr) {
+          throw new Error(
+            `SMTP TLS required: refusing to transmit credentials or OTP without TLS (${startTlsErr.message})`
+          );
         }
+        const plainSocket = socket;
+        socket = tls.connect({
+          socket: plainSocket,
+          host: cleanHost,
+          servername: cleanHost,
+          rejectUnauthorized: tlsOptions.rejectUnauthorized !== false
+        });
+        buffer = '';
+        pendingLines.length = 0;
+        attachSocketListeners(socket);
+        await waitForTlsHandshake(socket);
+        await sendCmd(`EHLO apex.windowasia.com`, [250]);
+      }
+
+      if (!isTlsEncrypted || !socket.encrypted) {
+        throw new Error(
+          'SMTP TLS required: refusing to send credentials or sensitive content over unencrypted connection'
+        );
       }
 
       if (user && password) {
@@ -331,15 +385,28 @@ async function sendEmailNotification({
   if ((enabled || forceTest) && recipient && (webhookUrl || smtpHost)) {
     try {
       if (webhookUrl) {
+        if (!/^https:\/\//i.test(webhookUrl)) {
+          throw new Error('Email webhook TLS required: email_webhook_url must use https://');
+        }
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 5000);
         const resp = await fetch(webhookUrl, {
           method: 'POST',
+          redirect: 'manual',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ to: recipient, from: fromAddr, subject, text, html }),
           signal: controller.signal
         });
         clearTimeout(timer);
+        if ((resp.status >= 300 && resp.status < 400) || resp.type === 'opaqueredirect') {
+          const location = resp.headers?.get ? resp.headers.get('location') : '';
+          throw new Error(
+            `Email webhook redirect forbidden (HTTP ${resp.status}${location ? ` -> ${location}` : ''}): refusing to redirect sensitive OTP payload`
+          );
+        }
+        if (resp.redirected || (resp.url && !/^https:\/\//i.test(resp.url))) {
+          throw new Error('Email webhook TLS required: redirected or non-HTTPS webhook target is forbidden');
+        }
         if (!resp.ok) {
           throw new Error(`Email webhook HTTP ${resp.status}`);
         }
@@ -548,7 +615,14 @@ async function createAndSendOtpChallenge(userDoc, purpose = 'login_2fa', ipAddre
       otp_code_hash: db.hashPassword(otpCode),
       otp_expires_at: expiresAt,
       otp_attempts: 0,
-      otp_purpose: purpose
+      otp_purpose: purpose,
+      ...(purpose === 'register'
+        ? {
+            otp_password_verified_at: null,
+            otp_password_verified_until: null,
+            otp_challenge_token_hash: null
+          }
+        : {})
     },
     userDoc.id
   );
@@ -612,6 +686,7 @@ async function createAndSendOtpChallenge(userDoc, purpose = 'login_2fa', ipAddre
 
 module.exports = {
   maskEmail,
+  sendSmtpMail,
   sendTelegramNotification,
   sendEmailNotification,
   createRegistrationInvite,

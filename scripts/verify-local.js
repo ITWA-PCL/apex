@@ -1067,12 +1067,44 @@ async function runVerification() {
   const regAuditLogs = await db.getAuditLogs(20);
   assert.ok(regAuditLogs.some(l => l.event_code === 'USER-REGISTER' && l.actor_id === 'EXT_CON_1'), 'USER-REGISTER audit log must be recorded');
 
-  // 12c. 2FA Login OTP Challenge & Verification
+  // 12c. 2FA Login OTP Challenge, Password-First Guard & Purpose Binding
   const enableOtpPatch = await invokeCollectionsRoute('PATCH', '/api/v1/db/users/EXT_CON_1', 'U01', {
     otp_enabled: true
   });
   assert.strictEqual(enableOtpPatch.statusCode, 200);
 
+  // Must require password verification before requesting or verifying login_2fa OTP
+  const otpReqBeforePwd = await invokeCiamReq('POST', '/api/auth/otp/request', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'ext.con1', purpose: 'login_2fa' }
+  });
+  assert.strictEqual(otpReqBeforePwd.statusCode, 403, 'Requesting login_2fa OTP before password verification must fail with 403');
+  assert.strictEqual(otpReqBeforePwd.body.error, 'password_verification_required');
+
+  const otpVerifyBeforePwd = await invokeCiamReq('POST', '/api/auth/otp/verify', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'ext.con1', otp_code: '123456' }
+  });
+  assert.strictEqual(otpVerifyBeforePwd.statusCode, 403, 'Verifying 2FA OTP before password verification must fail with 403');
+  assert.strictEqual(otpVerifyBeforePwd.body.error, 'password_verification_required');
+
+  // Registered account must not be allowed to request a 'register' OTP
+  const registerOtpOnRegistered = await invokeCiamReq('POST', '/api/auth/otp/request', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'ext.con1', purpose: 'register' }
+  });
+  assert.strictEqual(registerOtpOnRegistered.statusCode, 403, 'Already-registered account must not obtain a register OTP');
+  assert.strictEqual(registerOtpOnRegistered.body.error, 'already_registered');
+
+  // Invalid purpose must be rejected
+  const invalidPurposeRes = await invokeCiamReq('POST', '/api/auth/otp/request', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'ext.con1', purpose: 'admin_bypass' }
+  });
+  assert.strictEqual(invalidPurposeRes.statusCode, 400, 'Invalid OTP purpose must fail with 400');
+  assert.strictEqual(invalidPurposeRes.body.error, 'invalid_otp_purpose');
+
+  // Step 1: Client 1 verifies valid password first via /api/auth/login -> 200 otp_required + per-transaction token/cookie
   const otpLoginChallenge = await invokeCiamReq('POST', '/api/auth/login', {
     headers: { 'x-forwarded-for': '127.0.0.1' },
     body: {
@@ -1083,30 +1115,149 @@ async function runVerification() {
   });
   assert.strictEqual(otpLoginChallenge.statusCode, 200, '2FA OTP-enabled user login must return 200 challenge');
   assert.strictEqual(otpLoginChallenge.body.otp_required, true, 'Login must require OTP step before session issuance');
-  assert.strictEqual(otpLoginChallenge.headers['Set-Cookie'] || otpLoginChallenge.headers['set-cookie'], undefined, 'No session cookie may be issued prior to OTP verification');
+  assert.ok(otpLoginChallenge.body.pre_auth_token, 'Login challenge must issue per-transaction pre_auth_token');
+  const challengeSetCookie = String(otpLoginChallenge.headers['Set-Cookie'] || otpLoginChallenge.headers['set-cookie'] || '');
+  assert.strictEqual(/apex_session=/i.test(challengeSetCookie), false, 'No session cookie may be issued prior to OTP verification');
+  assert.ok(/apex_otp_challenge=/.test(challengeSetCookie), 'Login challenge must issue HttpOnly apex_otp_challenge cookie');
+  const client1PreAuthToken1 = otpLoginChallenge.body.pre_auth_token;
+
+  // Sanitized user doc must never leak pre-auth timestamps or challenge token hash
+  const extConSanitized = await invokeCollectionsRoute('GET', '/api/v1/db/users/EXT_CON_1', 'U01');
+  assert.strictEqual(extConSanitized.body.data.otp_password_verified_at, undefined);
+  assert.strictEqual(extConSanitized.body.data.otp_password_verified_until, undefined);
+  assert.strictEqual(extConSanitized.body.data.otp_challenge_token_hash, undefined);
 
   const otpRequestRes = await invokeCiamReq('POST', '/api/auth/otp/request', {
     headers: { 'x-forwarded-for': '127.0.0.1' },
-    body: { identifier: 'ext.con1', purpose: 'login_2fa' }
+    body: { identifier: 'ext.con1', purpose: 'login_2fa', pre_auth_token: client1PreAuthToken1 }
   });
-  assert.strictEqual(otpRequestRes.statusCode, 200, 'POST /api/auth/otp/request must succeed');
+  assert.strictEqual(otpRequestRes.statusCode, 200, 'POST /api/auth/otp/request with Client 1 pre_auth_token must succeed');
   assert.ok(String(otpRequestRes.body.masked_email || '').includes('@'), 'OTP request must return masked_email');
 
+  // Purpose mismatch test 1: login_2fa OTP must NEVER be accepted by /api/auth/register-first-time
+  const loginOtpForMismatch = await notifier.createAndSendOtpChallenge(await db.getDoc('users', 'EXT_CON_1'), 'login_2fa', '127.0.0.1');
+  const mismatchRegisterRes = await invokeCiamReq('POST', '/api/auth/register-first-time', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: {
+      identifier: 'ext.con1',
+      token_or_otp: loginOtpForMismatch.otp_code,
+      new_password: 'HijackedPassword#99',
+      form_render_ts: Date.now() - 2000
+    }
+  });
+  assert.strictEqual(mismatchRegisterRes.statusCode, 400, 'login_2fa OTP must be rejected on /api/auth/register-first-time');
+  assert.strictEqual(mismatchRegisterRes.body.error, 'otp_purpose_mismatch');
+
+  // Failed password attempt must invalidate pending 2FA pre-auth state & token
+  const badPwdInvalidates = await invokeCiamReq('POST', '/api/auth/login', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: {
+      identifier: 'ext.con1',
+      password: 'WrongPassword#999',
+      form_render_ts: Date.now() - 2000
+    }
+  });
+  assert.strictEqual(badPwdInvalidates.statusCode, 401);
+
+  const otpVerifyAfterBadPwd = await invokeCiamReq('POST', '/api/auth/otp/verify', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'ext.con1', otp_code: loginOtpForMismatch.otp_code, pre_auth_token: client1PreAuthToken1 }
+  });
+  assert.strictEqual(otpVerifyAfterBadPwd.statusCode, 403, 'Wrong password must clear pre-auth OTP verification window & challenge token');
+  assert.strictEqual(otpVerifyAfterBadPwd.body.error, 'password_verification_required');
+
+  // Client 1 re-authenticates password properly -> receives bound pre_auth_token
+  const reAuthChallenge = await invokeCiamReq('POST', '/api/auth/login', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: {
+      identifier: 'ext.con1',
+      password: 'NewContractor#99',
+      form_render_ts: Date.now() - 2000
+    }
+  });
+  assert.strictEqual(reAuthChallenge.statusCode, 200);
+  assert.strictEqual(reAuthChallenge.body.otp_required, true);
+  const client1PreAuthToken2 = reAuthChallenge.body.pre_auth_token;
+  assert.ok(client1PreAuthToken2 && client1PreAuthToken2 !== client1PreAuthToken1, 'Each login transaction must generate a fresh pre_auth_token');
+
+  // 2-Client Isolation Tests: Client 2 (even knowing valid OTP!) cannot hijack Client 1's login transaction
+  const freshOtp = await notifier.createAndSendOtpChallenge(await db.getDoc('users', 'EXT_CON_1'), 'login_2fa', '127.0.0.1');
+
+  const client2NoTokenRes = await invokeCiamReq('POST', '/api/auth/otp/verify', {
+    headers: { 'x-forwarded-for': '203.0.113.88' },
+    body: { identifier: 'ext.con1', otp_code: freshOtp.otp_code }
+  });
+  assert.strictEqual(client2NoTokenRes.statusCode, 403, 'Client 2 without pre_auth_token must be blocked even with valid OTP');
+  assert.strictEqual(client2NoTokenRes.body.error, 'password_verification_required');
+  assert.strictEqual(client2NoTokenRes.headers['Set-Cookie'] || client2NoTokenRes.headers['set-cookie'], undefined);
+
+  const client2ForgedTokenRes = await invokeCiamReq('POST', '/api/auth/otp/verify', {
+    headers: { 'x-forwarded-for': '203.0.113.88' },
+    body: { identifier: 'ext.con1', otp_code: freshOtp.otp_code, pre_auth_token: 'forged_token_from_other_client_123456' }
+  });
+  assert.strictEqual(client2ForgedTokenRes.statusCode, 403, 'Client 2 with forged pre_auth_token must be blocked');
+  assert.strictEqual(client2ForgedTokenRes.body.error, 'password_verification_required');
+
+  const client2ReqOtpForgedRes = await invokeCiamReq('POST', '/api/auth/otp/request', {
+    headers: { 'x-forwarded-for': '203.0.113.88' },
+    body: { identifier: 'ext.con1', purpose: 'login_2fa', pre_auth_token: 'forged_token_from_other_client_123456' }
+  });
+  assert.strictEqual(client2ReqOtpForgedRes.statusCode, 403, 'Client 2 with forged pre_auth_token must not re-request login_2fa OTP');
+  assert.strictEqual(client2ReqOtpForgedRes.body.error, 'password_verification_required');
+
+  // Client 1 tests wrong OTP -> 401, then valid OTP + matching pre_auth_token -> 200 + apex_session cookie
   const otpWrongRes = await invokeCiamReq('POST', '/api/auth/otp/verify', {
     headers: { 'x-forwarded-for': '127.0.0.1' },
-    body: { identifier: 'ext.con1', otp_code: '000000' }
+    body: { identifier: 'ext.con1', otp_code: '000000', pre_auth_token: client1PreAuthToken2 }
   });
   assert.strictEqual(otpWrongRes.statusCode, 401, 'Invalid OTP must be rejected with 401');
 
-  const freshOtp = await notifier.createAndSendOtpChallenge(await db.getDoc('users', 'EXT_CON_1'), 'login_2fa', '127.0.0.1');
+  const client1ReqOtpOk = await invokeCiamReq('POST', '/api/auth/otp/request', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'ext.con1', purpose: 'login_2fa', pre_auth_token: client1PreAuthToken2 }
+  });
+  assert.strictEqual(client1ReqOtpOk.statusCode, 200, 'Client 1 with valid pre_auth_token must be able to re-request OTP');
+
+  const freshOtp2 = await notifier.createAndSendOtpChallenge(await db.getDoc('users', 'EXT_CON_1'), 'login_2fa', '127.0.0.1');
   const otpVerifyOk = await invokeCiamReq('POST', '/api/auth/otp/verify', {
     headers: { 'x-forwarded-for': '127.0.0.1' },
-    body: { identifier: 'ext.con1', otp_code: freshOtp.otp_code }
+    body: { identifier: 'ext.con1', otp_code: freshOtp2.otp_code, pre_auth_token: client1PreAuthToken2 }
   });
-  assert.strictEqual(otpVerifyOk.statusCode, 200, 'Valid OTP verification must return 200');
+  assert.strictEqual(otpVerifyOk.statusCode, 200, 'Client 1 with valid OTP + matching pre_auth_token must return 200');
   const otpSetCookie = otpVerifyOk.headers['Set-Cookie'] || otpVerifyOk.headers['set-cookie'] || '';
   assert.ok(/apex_session=[^;]+/.test(String(otpSetCookie)), 'Valid OTP verification must issue apex_session cookie');
-  const otpLogs = await db.getAuditLogs(30);
+
+  // Purpose mismatch test 2: register OTP on pending account must NEVER be accepted by /api/auth/otp/verify
+  const pendingRegUser = await invokeCollectionsRoute('POST', '/api/v1/db/users', 'U01', {
+    id: 'EXT_PURPOSE_REG',
+    name: 'Pending Purpose Check',
+    username: 'ext.purpose.reg',
+    email: 'purpose@contractor.co.th',
+    department: 'External Installers',
+    role: 'contractor',
+    kind: 'external',
+    company: 'Purpose Co',
+    team: 'T01',
+    projects: ['P2601'],
+    use_ad_auth: false,
+    send_invite: false
+  });
+  assert.strictEqual(pendingRegUser.statusCode, 201);
+
+  const reqRegOtpRes = await invokeCiamReq('POST', '/api/auth/otp/request', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'EXT_PURPOSE_REG', purpose: 'register' }
+  });
+  assert.strictEqual(reqRegOtpRes.statusCode, 200, 'Requesting register OTP for pending user must succeed');
+
+  const mismatchVerifyRes = await invokeCiamReq('POST', '/api/auth/otp/verify', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'EXT_PURPOSE_REG', otp_code: '123456' }
+  });
+  assert.strictEqual(mismatchVerifyRes.statusCode, 400, 'register OTP must be rejected on /api/auth/otp/verify');
+  assert.strictEqual(mismatchVerifyRes.body.error, 'otp_purpose_mismatch');
+
+  const otpLogs = await db.getAuditLogs(40);
   assert.ok(otpLogs.some(l => l.event_code === 'OTP-SEND' && l.actor_id === 'EXT_CON_1'), 'OTP-SEND audit log must be recorded');
   assert.ok(otpLogs.some(l => l.event_code === 'OTP-FAIL' && l.actor_id === 'EXT_CON_1'), 'OTP-FAIL audit log must be recorded');
   assert.ok(otpLogs.some(l => l.event_code === 'OTP-VERIFY' && l.actor_id === 'EXT_CON_1'), 'OTP-VERIFY audit log must be recorded');
@@ -1153,7 +1304,127 @@ async function runVerification() {
     }
   });
   await db.updateSystemSettings({ telegram_bot_token: '', smtp_password: '' }, 'U01');
-  console.log(' [OK] 3-Tier User Standardization, First-Time Invite/Register, 2FA OTP & Telegram/Email Settings verified');
+
+  // 12e. SMTP Must Not Transmit Secrets Without TLS & Webhook Must Require HTTPS
+  const net = require('net');
+  let smtpTranscript = '';
+  const mockSmtpServer = net.createServer(sock => {
+    let rxBuf = '';
+    sock.write('220 mock.local ESMTP\r\n');
+    sock.on('data', chunk => {
+      const textChunk = chunk.toString('utf8');
+      smtpTranscript += textChunk;
+      rxBuf += textChunk;
+      const lines = rxBuf.split(/\r?\n/);
+      rxBuf = lines.pop() || '';
+      for (const line of lines) {
+        if (/^EHLO /i.test(line)) {
+          sock.write('250-mock.local\r\n250 PIPELINING\r\n');
+        } else if (/^STARTTLS/i.test(line)) {
+          sock.write('502 5.5.1 STARTTLS not supported\r\n');
+        }
+      }
+    });
+  });
+
+  await new Promise(resolve => mockSmtpServer.listen(0, '127.0.0.1', resolve));
+  const mockPort = mockSmtpServer.address().port;
+  try {
+    let smtpError = null;
+    try {
+      await notifier.sendSmtpMail({
+        host: '127.0.0.1',
+        port: mockPort,
+        user: 'smtp_user',
+        password: 'SuperSecretSmtpPassword!99',
+        from: 'noreply@windowasia.com',
+        to: 'target@example.com',
+        subject: 'Secret OTP',
+        text: 'OTP: 654321'
+      });
+    } catch (err) {
+      smtpError = err;
+    }
+    assert.ok(smtpError && /SMTP TLS required/i.test(smtpError.message), 'SMTP without TLS/STARTTLS must abort with SMTP TLS required');
+    assert.strictEqual(/AUTH LOGIN/i.test(smtpTranscript), false, 'AUTH LOGIN must never be sent without TLS');
+    assert.strictEqual(smtpTranscript.includes(Buffer.from('SuperSecretSmtpPassword!99', 'utf8').toString('base64')), false, 'SMTP password must never be sent without TLS');
+    assert.strictEqual(/MAIL FROM:|DATA/i.test(smtpTranscript), false, 'Mail envelope/body must never be sent without TLS');
+    assert.strictEqual(smtpTranscript.includes('654321'), false, 'Sensitive OTP content must never be sent without TLS');
+  } finally {
+    await new Promise(resolve => mockSmtpServer.close(resolve));
+  }
+
+  await db.updateSystemSettings({ email_webhook_url: 'http://insecure.example.com/hook' }, 'U01');
+  const insecureWebhookRes = await notifier.sendEmailNotification({
+    to: 'target@example.com',
+    subject: 'Secret OTP',
+    text: 'OTP: 654321',
+    forceTest: true
+  });
+  await db.updateSystemSettings({ email_webhook_url: '' }, 'U01');
+  assert.strictEqual(insecureWebhookRes.ok, false, 'Non-HTTPS email webhook must be rejected');
+  assert.strictEqual(insecureWebhookRes.status, 'failed');
+  assert.ok(/TLS required|https/i.test(insecureWebhookRes.message), 'Webhook failure must report HTTPS/TLS requirement');
+
+  // HTTPS Webhook 307/308 redirect to HTTP must NEVER be followed or leak OTP payload
+  const http = require('http');
+  let httpLeakCount = 0;
+  let httpLeakedBody = '';
+  const leakHttpServer = http.createServer((req, res) => {
+    httpLeakCount += 1;
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString('utf8');
+    });
+    req.on('end', () => {
+      httpLeakedBody += body;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"leaked":true}');
+    });
+  });
+
+  await new Promise(resolve => leakHttpServer.listen(0, '127.0.0.1', resolve));
+  const httpLeakPort = leakHttpServer.address().port;
+  const origFetch = globalThis.fetch;
+  try {
+    for (const redirStatus of [307, 308]) {
+      const targetUrl = `https://secure-webhook.windowasia.test/email-${redirStatus}`;
+      globalThis.fetch = async (url, init = {}) => {
+        if (String(url) === targetUrl) {
+          if (init.redirect !== 'manual') {
+            return origFetch(`http://127.0.0.1:${httpLeakPort}/leaked`, {
+              method: init.method || 'POST',
+              headers: init.headers,
+              body: init.body
+            });
+          }
+          return new Response(null, {
+            status: redirStatus,
+            headers: { location: `http://127.0.0.1:${httpLeakPort}/leaked` }
+          });
+        }
+        return origFetch(url, init);
+      };
+
+      await db.updateSystemSettings({ email_webhook_url: targetUrl }, 'U01');
+      const redirRes = await notifier.sendEmailNotification({
+        to: 'target@example.com',
+        subject: 'OTP',
+        text: 'OTP: 998877',
+        forceTest: true
+      });
+      assert.strictEqual(redirRes.ok, false, `HTTPS webhook HTTP ${redirStatus} redirect must fail`);
+      assert.strictEqual(redirRes.status, 'failed');
+      assert.ok(/redirect forbidden/i.test(redirRes.message), `Must reject ${redirStatus} redirect cleanly`);
+    }
+    assert.strictEqual(httpLeakCount, 0, 'Redirected HTTP target must NEVER receive request');
+    assert.strictEqual(httpLeakedBody.includes('998877'), false, 'OTP secret must NEVER be leaked to redirected HTTP target');
+  } finally {
+    globalThis.fetch = origFetch;
+    await db.updateSystemSettings({ email_webhook_url: '' }, 'U01');
+    await new Promise(resolve => leakHttpServer.close(resolve));
+  }
+  console.log(' [OK] 3-Tier Users, 2-Client Pre-Auth Binding, Purpose Binding, SMTP/Webhook TLS & Redirect Guard verified');
 
   console.log('=================================================================');
   console.log(' ✅ ALL LOCAL COMPILE & SECURITY/FINANCE CHECKS PASSED (0 ERRORS)');
