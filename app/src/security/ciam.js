@@ -7,6 +7,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const db = require('../db/postgres');
+const notifier = require('./notifier');
 const { ssoSessions, parseCookies, revokeUserSessions, ROLE_DEF } = require('./rbac');
 const { createAuthRateLimiter } = require('./headers');
 
@@ -159,6 +160,122 @@ function findUserFlexible(users = [], identifier = '') {
   );
 }
 
+function isExternalAccount(userRecord) {
+  if (!userRecord) return false;
+  return (
+    userRecord.kind === 'external' ||
+    ['contractor', 'customer'].includes(String(userRecord.role || '').toLowerCase())
+  );
+}
+
+function isAdManagedAccount(userRecord) {
+  if (!userRecord || userRecord.id === 'U01') return false;
+  if (isExternalAccount(userRecord)) return false;
+  return userRecord.use_ad_auth === true || userRecord.use_ad_auth === undefined;
+}
+
+function buildAuthUserProfile(userRecord, isAdUser) {
+  return {
+    id: userRecord.id,
+    uid: userRecord.uid || userRecord.id,
+    username: userRecord.username || userRecord.uid || userRecord.id,
+    name: userRecord.name,
+    email: userRecord.email || '',
+    department: userRecord.department || userRecord.title || 'Operations',
+    role: userRecord.role,
+    kind: userRecord.kind || (isExternalAccount(userRecord) ? 'external' : 'internal'),
+    use_ad_auth: Boolean(isAdUser),
+    otp_enabled: Boolean(userRecord.otp_enabled)
+  };
+}
+
+async function issueUserSession(
+  req,
+  res,
+  userRecord,
+  { authMethod = 'local_credentials', mustChangePassword = false, settings = null } = {}
+) {
+  const s = settings || (await db.getSystemSettings());
+  const nowIso = new Date().toISOString();
+  const ttlMinutes = Math.max(5, Number(s.ciam_session_ttl_minutes) || 480);
+  const maxAgeSeconds = ttlMinutes * 60;
+  const sessionId = crypto.randomBytes(32).toString('hex');
+  const sessionPayload = {
+    userId: userRecord.id,
+    uid: userRecord.uid || userRecord.id,
+    username: userRecord.username || userRecord.uid || userRecord.id,
+    email: userRecord.email || `${String(userRecord.id).toLowerCase()}@windowasia.co.th`,
+    authMethod,
+    authenticatedAt: nowIso,
+    expiresAt: Date.now() + maxAgeSeconds * 1000,
+    mustChangePassword: Boolean(mustChangePassword)
+  };
+  ssoSessions.set(sessionId, sessionPayload);
+  await db.saveSession(sessionId, sessionPayload);
+
+  await db.updateDoc(
+    'users',
+    userRecord.id,
+    { lastSeen: nowIso, last_login_at: nowIso },
+    userRecord.id
+  );
+
+  res.setHeader('Set-Cookie', buildSessionCookie(req, sessionId, maxAgeSeconds));
+  return { sessionId, sessionPayload, nowIso };
+}
+
+async function checkBotDefenseGuards(req, res, { targetResource = '/api/auth/login', checkTiming = true } = {}) {
+  const { identifier, corporate_fax, security_honey, form_render_ts } = req.body || {};
+  const cleanId = String(identifier || '').trim().toLowerCase();
+  const clientIp = getClientIp(req);
+
+  if (corporate_fax || security_honey) {
+    await db.insertAuditLog({
+      eventCode: 'BOT_HONEYPOT_DETECTED',
+      actorEmail: cleanId || 'unknown',
+      ipAddress: clientIp,
+      targetResource,
+      details: {
+        reason: 'honeypot_field_filled',
+        corporate_fax: Boolean(corporate_fax),
+        security_honey: Boolean(security_honey)
+      }
+    });
+    res.status(401).json({
+      error: 'invalid_credentials',
+      message: 'รหัสผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง'
+    });
+    return false;
+  }
+
+  if (checkTiming && form_render_ts !== undefined && form_render_ts !== null && form_render_ts !== '') {
+    const ts = Number(form_render_ts);
+    if (!isNaN(ts)) {
+      const deltaMs = Date.now() - ts;
+      if (deltaMs < 400 || deltaMs < -10000) {
+        await db.insertAuditLog({
+          eventCode: 'BOT_TIMING_VIOLATION',
+          actorEmail: cleanId || 'unknown',
+          ipAddress: clientIp,
+          targetResource,
+          details: {
+            delta_ms: deltaMs,
+            reason: deltaMs < 400 ? 'submission_too_fast' : 'timestamp_in_future'
+          }
+        });
+        res.status(400).json({
+          error: 'velocity_timing_violation',
+          code: 'BOT_TIMING_VIOLATION',
+          message: 'ตรวจพบความเร็วการส่งข้อมูลผิดปกติของมนุษย์ (< 400ms)'
+        });
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
 // ============================================================================
 // GROUP A: Admin Settings API (Zero .env Dependency -> PostgreSQL system_settings)
 // ============================================================================
@@ -195,6 +312,22 @@ router.get('/api/settings/ciam-sso', async (req, res) => {
       require_login: s.require_login !== 'false',
       has_admin_password: Boolean(s.admin_password_hash),
       last_directory_sync_at: s.last_directory_sync_at || null,
+      telegram_enabled: s.telegram_enabled === 'true',
+      telegram_bot_token_masked: maskSecret(s.telegram_bot_token),
+      has_telegram_bot_token: Boolean(s.telegram_bot_token),
+      telegram_chat_id: s.telegram_chat_id || '',
+      telegram_notify_login: s.telegram_notify_login !== 'false',
+      telegram_notify_user_provision: s.telegram_notify_user_provision !== 'false',
+      telegram_notify_security_alert: s.telegram_notify_security_alert !== 'false',
+      email_enabled: s.email_enabled === 'true',
+      smtp_host: s.smtp_host || '',
+      smtp_port: Number(s.smtp_port) || 587,
+      smtp_user: s.smtp_user || '',
+      smtp_password_masked: maskSecret(s.smtp_password),
+      has_smtp_password: Boolean(s.smtp_password),
+      smtp_from: s.smtp_from || 'APEX Security <noreply@windowasia.com>',
+      email_webhook_url: s.email_webhook_url || '',
+      login_otp_external: s.login_otp_external === 'true',
       database_mode: db.isUsingPostgres() ? 'postgresql' : 'local-fallback'
     });
   } catch (err) {
@@ -221,7 +354,13 @@ async function handleUpdateCiamSettings(req, res) {
       'ciam_auto_provision_group',
       'break_glass_url',
       'ai_provider_url',
-      'ai_model_name'
+      'ai_model_name',
+      'telegram_chat_id',
+      'smtp_host',
+      'smtp_port',
+      'smtp_user',
+      'smtp_from',
+      'email_webhook_url'
     ];
     for (const f of stringFields) {
       if (body[f] !== undefined) updates[f] = String(body[f]).trim();
@@ -232,21 +371,38 @@ async function handleUpdateCiamSettings(req, res) {
         updates.ciam_session_ttl_minutes = String(ttl);
       }
     }
-    if (body.ciam_enabled !== undefined) updates.ciam_enabled = String(Boolean(body.ciam_enabled));
-    if (body.break_glass_enabled !== undefined) updates.break_glass_enabled = String(Boolean(body.break_glass_enabled));
-    if (body.ai_copilot_enabled !== undefined) updates.ai_copilot_enabled = String(Boolean(body.ai_copilot_enabled));
-    if (body.require_login !== undefined) updates.require_login = String(Boolean(body.require_login));
+    const boolFields = [
+      'ciam_enabled',
+      'break_glass_enabled',
+      'ai_copilot_enabled',
+      'require_login',
+      'telegram_enabled',
+      'telegram_notify_login',
+      'telegram_notify_user_provision',
+      'telegram_notify_security_alert',
+      'email_enabled',
+      'login_otp_external'
+    ];
+    for (const bf of boolFields) {
+      if (body[bf] !== undefined) updates[bf] = String(Boolean(body[bf]));
+    }
 
-    if (body.ciam_client_secret && !body.ciam_client_secret.includes('••••')) {
+    if (body.ciam_client_secret && !String(body.ciam_client_secret).includes('••••')) {
       updates.ciam_client_secret = String(body.ciam_client_secret).trim();
     }
-    if (body.ciam_management_api_key && !body.ciam_management_api_key.includes('••••')) {
+    if (body.ciam_management_api_key && !String(body.ciam_management_api_key).includes('••••')) {
       updates.ciam_management_api_key = String(body.ciam_management_api_key).trim();
     }
-    if (body.ai_api_key && !body.ai_api_key.includes('••••')) {
+    if (body.ai_api_key && !String(body.ai_api_key).includes('••••')) {
       updates.ai_api_key = String(body.ai_api_key).trim();
     }
-    if (body.admin_local_password && !body.admin_local_password.includes('••••')) {
+    if (body.telegram_bot_token && !String(body.telegram_bot_token).includes('••••')) {
+      updates.telegram_bot_token = String(body.telegram_bot_token).trim();
+    }
+    if (body.smtp_password && !String(body.smtp_password).includes('••••')) {
+      updates.smtp_password = String(body.smtp_password).trim();
+    }
+    if (body.admin_local_password && !String(body.admin_local_password).includes('••••')) {
       const pwd = String(body.admin_local_password).trim();
       const compErr = validatePasswordComplexity(pwd, 'admin');
       if (compErr) {
@@ -266,7 +422,7 @@ async function handleUpdateCiamSettings(req, res) {
       details: { updated_keys: Object.keys(updates) }
     });
 
-    res.json({ status: 'ok', message: 'บันทึกการตั้งค่า Central IAM & Security ลงตาราง system_settings เรียบร้อยแล้ว' });
+    res.json({ status: 'ok', message: 'บันทึกการตั้งค่า Central IAM, Telegram & Security ลงตาราง system_settings เรียบร้อยแล้ว' });
   } catch (err) {
     res.status(500).json({ error: 'internal_error', message: err.message });
   }
@@ -275,6 +431,56 @@ async function handleUpdateCiamSettings(req, res) {
 // Support both PUT (Spec A.2) and POST for backwards compatibility
 router.put('/api/settings/ciam-sso', handleUpdateCiamSettings);
 router.post('/api/settings/ciam-sso', handleUpdateCiamSettings);
+
+router.post('/api/settings/notifications/test-telegram', async (req, res) => {
+  try {
+    if (!req.apexUser?.permissions?.includes('users')) {
+      return res.status(403).json({ error: 'forbidden', message: 'เฉพาะผู้ดูแลระบบเท่านั้น' });
+    }
+    const result = await notifier.sendTelegramNotification({
+      text: `<b>[APEX Test] ทดสอบการเชื่อมต่อ Telegram Notification</b>\n• ผู้ทดสอบ: ${req.apexUser.name || req.apexUser.id}\n• เวลา: ${new Date().toLocaleString('th-TH')}`,
+      chatId: req.body?.chat_id || '',
+      eventType: 'manual_test',
+      actor: req.apexUser,
+      ipAddress: getClientIp(req),
+      targetResource: 'settings/telegram',
+      forceTest: true
+    });
+    res.json({ status: result.ok ? 'ok' : 'error', ...result });
+  } catch (err) {
+    res.status(500).json({ error: 'telegram_test_error', message: err.message });
+  }
+});
+
+router.post('/api/settings/notifications/test-email', async (req, res) => {
+  try {
+    if (!req.apexUser?.permissions?.includes('users')) {
+      return res.status(403).json({ error: 'forbidden', message: 'เฉพาะผู้ดูแลระบบเท่านั้น' });
+    }
+    const s = await db.getSystemSettings();
+    const to = String(req.body?.to || req.apexUser.email || s.smtp_user || '').trim();
+    if (!to) {
+      return res.status(400).json({
+        error: 'missing_recipient',
+        message: 'กรุณาระบุอีเมลปลายทางสำหรับการทดสอบ'
+      });
+    }
+    const result = await notifier.sendEmailNotification({
+      to,
+      subject: '[APEX Security] ทดสอบการส่งอีเมลและ OTP',
+      text: `นี่คือข้อความทดสอบระบบส่งอีเมลและรหัส OTP ของ APEX (${s.app_domain || 'https://apex.windowasia.com'}) โดย ${req.apexUser.name || req.apexUser.id}`,
+      html: `<p>ทดสอบระบบส่งอีเมลแจ้งเตือนและ OTP ของ <strong>APEX</strong> สำเร็จ (ผู้ทดสอบ: ${req.apexUser.name || req.apexUser.id})</p>`,
+      eventType: 'manual_test',
+      actor: req.apexUser,
+      ipAddress: getClientIp(req),
+      targetResource: 'settings/email',
+      forceTest: true
+    });
+    res.json({ status: result.ok ? 'ok' : 'error', ...result });
+  } catch (err) {
+    res.status(500).json({ error: 'email_test_error', message: err.message });
+  }
+});
 
 router.post('/api/settings/ciam-sso/test', async (req, res) => {
   try {
@@ -366,56 +572,17 @@ router.get('/api/auth/sso/config', async (req, res) => {
 
 router.post('/api/auth/login', authRateLimiter, async (req, res) => {
   try {
-    const { identifier, password, corporate_fax, security_honey, form_render_ts } = req.body || {};
+    const passedGuards = await checkBotDefenseGuards(req, res, {
+      targetResource: '/api/auth/login',
+      checkTiming: true
+    });
+    if (!passedGuards) return;
+
+    const { identifier, password } = req.body || {};
     const s = await db.getSystemSettings();
     const users = await db.getCollection('users');
     const cleanId = String(identifier || '').trim().toLowerCase();
     const clientIp = getClientIp(req);
-
-    // Layer 2: Decoy Honeypot Trap Evaluation (Spec v2.12.0 หมวด F.3)
-    if (corporate_fax || security_honey) {
-      await db.insertAuditLog({
-        eventCode: 'BOT_HONEYPOT_DETECTED',
-        actorEmail: cleanId || 'unknown',
-        ipAddress: clientIp,
-        targetResource: '/api/auth/login',
-        details: {
-          reason: 'honeypot_field_filled',
-          corporate_fax: Boolean(corporate_fax),
-          security_honey: Boolean(security_honey)
-        }
-      });
-      // Silent rejection with standard credentials error (hides honeypot presence from bot)
-      return res.status(401).json({
-        error: 'invalid_credentials',
-        message: 'รหัสผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง'
-      });
-    }
-
-    // Layer 3: Submission Velocity & Timing Guard (Spec v2.12.0 หมวด F.4)
-    if (form_render_ts !== undefined && form_render_ts !== null && form_render_ts !== '') {
-      const ts = Number(form_render_ts);
-      if (!isNaN(ts)) {
-        const deltaMs = Date.now() - ts;
-        if (deltaMs < 400 || deltaMs < -10000) {
-          await db.insertAuditLog({
-            eventCode: 'BOT_TIMING_VIOLATION',
-            actorEmail: cleanId || 'unknown',
-            ipAddress: clientIp,
-            targetResource: '/api/auth/login',
-            details: {
-              delta_ms: deltaMs,
-              reason: deltaMs < 400 ? 'submission_too_fast' : 'timestamp_in_future'
-            }
-          });
-          return res.status(400).json({
-            error: 'velocity_timing_violation',
-            code: 'BOT_TIMING_VIOLATION',
-            message: 'ตรวจพบความเร็วการส่งข้อมูลผิดปกติของมนุษย์ (< 400ms)'
-          });
-        }
-      }
-    }
 
     if (!cleanId || !password) {
       return res.status(400).json({
@@ -462,9 +629,53 @@ router.post('/api/auth/login', authRateLimiter, async (req, res) => {
       });
     }
 
-    const isAdUser = userRecord.use_ad_auth === true || (userRecord.use_ad_auth === undefined && userRecord.kind !== 'external');
+    const isExternal = isExternalAccount(userRecord);
+    const isAdUser = isAdManagedAccount(userRecord);
 
-    // Verify per-user password_hash (or primary admin U01's admin_password_hash ONLY — no shared fallback across users)
+    // 3-Tier Policy (1a): Internal Users with AD Account MUST login via AD SSO only
+    if (isAdUser) {
+      if (s.ciam_enabled === 'true' && s.break_glass_enabled !== 'true') {
+        await db.insertAuditLog({
+          eventCode: 'SSO-02',
+          actorId: userRecord.id,
+          actorEmail: userRecord.email || cleanId,
+          actorRole: userRecord.role,
+          ipAddress: clientIp,
+          targetResource: '/api/auth/login',
+          details: { reason: 'ad_account_must_use_sso', ciam_enabled: true }
+        });
+        return res.status(403).json({
+          error: 'ad_sso_required',
+          message: 'บัญชีนี้เป็นบัญชีพนักงาน AD กรุณาเข้าสู่ระบบผ่านปุ่ม Window Asia Central IAM (SSO) เท่านั้น'
+        });
+      }
+      if (s.break_glass_enabled !== 'true' && !userRecord.password_hash) {
+        await db.insertAuditLog({
+          eventCode: 'SSO-02',
+          actorId: userRecord.id,
+          actorEmail: userRecord.email || cleanId,
+          actorRole: userRecord.role,
+          ipAddress: clientIp,
+          targetResource: '/api/auth/login',
+          details: { reason: 'ad_account_must_use_sso', no_local_password: true }
+        });
+        return res.status(403).json({
+          error: 'ad_sso_required',
+          message: 'บัญชีนี้เป็นบัญชีพนักงาน AD (ไม่มีรหัสผ่าน Local) กรุณาเข้าสู่ระบบผ่าน Central IAM SSO'
+        });
+      }
+    }
+
+    // 3-Tier Policy (1b & 2): Non-AD Local Users without initial password must complete First-Time Registration
+    if (!isAdUser && !userRecord.password_hash && userRecord.id !== 'U01') {
+      return res.status(403).json({
+        error: 'registration_required',
+        username: userRecord.username || userRecord.id,
+        message: 'บัญชีนี้ยังไม่ได้ตั้งรหัสผ่านครั้งแรก กรุณาลงทะเบียนเข้าใช้งานครั้งแรกด้วยรหัสเชิญ/OTP'
+      });
+    }
+
+    // Verify per-user password_hash (or primary admin U01's admin_password_hash ONLY)
     let passwordValid = false;
     let usedBreakGlassGateway = false;
     if (userRecord.password_hash) {
@@ -508,15 +719,35 @@ router.post('/api/auth/login', authRateLimiter, async (req, res) => {
         targetResource: '/api/auth/login',
         details: { reason: 'invalid_password' }
       });
+      if (s.telegram_enabled === 'true' && s.telegram_notify_security_alert === 'true') {
+        await notifier.sendTelegramNotification({
+          text: `<b>[APEX Security Alert]</b> ความพยายามเข้าสู่ระบบรหัสผ่านไม่ถูกต้อง (SSO-02)\n• บัญชี: <code>${userRecord.username || userRecord.id}</code>\n• IP: <code>${clientIp}</code>`,
+          eventType: 'security_alert_sso02',
+          actor: userRecord,
+          ipAddress: clientIp,
+          targetResource: '/api/auth/login'
+        }).catch(() => {});
+      }
       return res.status(401).json({
         error: 'invalid_credentials',
         message: 'รหัสผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง'
       });
     }
 
-    // MANDATORY RULE: 90-Day Forced Password Rotation & Complexity (Spec v2.12.0 หมวด G)
-    // Applies ONLY to Local Accounts (use_ad_auth === false or Local Admin login)!
-    // MUST NEVER apply to AD Accounts (use_ad_auth === true)!
+    // Optional 2FA OTP Challenge for External or OTP-enabled Local Accounts
+    if (!isAdUser && (userRecord.otp_enabled === true || (isExternal && s.login_otp_external === 'true'))) {
+      const challenge = await notifier.createAndSendOtpChallenge(userRecord, 'login_2fa', clientIp);
+      return res.json({
+        status: 'otp_required',
+        otp_required: true,
+        identifier: userRecord.username || userRecord.id,
+        masked_email: challenge.masked_email,
+        expires_at: challenge.expires_at,
+        message: 'กรุณากรอกรหัส OTP 6 หลักที่ส่งไปยังอีเมล/Telegram ของคุณ'
+      });
+    }
+
+    // MANDATORY RULE: 90-Day Forced Password Rotation (Spec v2.12.0 หมวด G - Local Only)
     let mustChangePassword = false;
     let passwordExpired = false;
     let daysLeft = 90;
@@ -526,35 +757,13 @@ router.post('/api/auth/login', authRateLimiter, async (req, res) => {
       passwordExpired = expiry.expired;
       daysLeft = expiry.daysLeft;
       mustChangePassword = Boolean(userRecord.must_change_password) || expiry.expired;
-    } else {
-      // AD Account: Strictly bypassed 100%!
-      mustChangePassword = false;
-      passwordExpired = false;
     }
 
-    const nowIso = new Date().toISOString();
-    const ttlMinutes = Math.max(5, Number(s.ciam_session_ttl_minutes) || 480);
-    const maxAgeSeconds = ttlMinutes * 60;
-    const sessionId = crypto.randomBytes(32).toString('hex');
-    const sessionPayload = {
-      userId: userRecord.id,
-      uid: userRecord.uid || userRecord.id,
-      username: userRecord.username || userRecord.uid || userRecord.id,
-      email: userRecord.email || `${String(userRecord.id).toLowerCase()}@windowasia.co.th`,
+    const { sessionPayload } = await issueUserSession(req, res, userRecord, {
       authMethod: usedBreakGlassGateway ? 'break_glass_ad' : 'local_credentials',
-      authenticatedAt: nowIso,
-      expiresAt: Date.now() + maxAgeSeconds * 1000,
-      mustChangePassword
-    };
-    ssoSessions.set(sessionId, sessionPayload);
-    await db.saveSession(sessionId, sessionPayload);
-
-    await db.updateDoc(
-      'users',
-      userRecord.id,
-      { lastSeen: nowIso, last_login_at: nowIso },
-      userRecord.id
-    );
+      mustChangePassword,
+      settings: s
+    });
 
     await db.insertAuditLog({
       eventCode: usedBreakGlassGateway ? 'BG-02' : 'SSO-01',
@@ -572,26 +781,416 @@ router.post('/api/auth/login', authRateLimiter, async (req, res) => {
       }
     });
 
-    res.setHeader('Set-Cookie', buildSessionCookie(req, sessionId, maxAgeSeconds));
+    if (s.telegram_enabled === 'true' && s.telegram_notify_login === 'true') {
+      await notifier.sendTelegramNotification({
+        text: `<b>[APEX Login]</b> เข้าสู่ระบบสำเร็จ (${sessionPayload.authMethod})\n• ผู้ใช้: <b>${userRecord.name}</b> (<code>${userRecord.username || userRecord.id}</code>)\n• บทบาท: ${userRecord.role}\n• IP: <code>${clientIp}</code>`,
+        eventType: 'login_success',
+        actor: userRecord,
+        ipAddress: clientIp,
+        targetResource: '/api/auth/login'
+      }).catch(() => {});
+    }
+
     res.json({
       status: 'ok',
       message: `เข้าสู่ระบบสำเร็จในชื่อ ${userRecord.name}`,
       must_change_password: mustChangePassword,
       password_expired: passwordExpired,
       password_days_left: daysLeft,
-      user: {
-        id: userRecord.id,
-        uid: userRecord.uid || userRecord.id,
-        username: userRecord.username || userRecord.uid || userRecord.id,
-        name: userRecord.name,
-        email: userRecord.email,
-        department: userRecord.department || userRecord.title || 'Operations',
-        role: userRecord.role,
-        use_ad_auth: isAdUser
-      }
+      user: buildAuthUserProfile(userRecord, isAdUser)
     });
   } catch (err) {
     res.status(500).json({ error: 'login_error', message: err.message });
+  }
+});
+
+/**
+ * Request an Email/Telegram 6-digit OTP for First-Time Registration or 2FA Login Verification
+ */
+router.post('/api/auth/otp/request', authRateLimiter, async (req, res) => {
+  try {
+    const passedGuards = await checkBotDefenseGuards(req, res, {
+      targetResource: '/api/auth/otp/request',
+      checkTiming: false
+    });
+    if (!passedGuards) return;
+
+    const { identifier, purpose } = req.body || {};
+    const cleanId = String(identifier || '').trim();
+    const clientIp = getClientIp(req);
+    if (!cleanId) {
+      return res.status(400).json({ error: 'missing_identifier', message: 'กรุณาระบุ Username หรืออีเมล' });
+    }
+
+    const users = await db.getCollection('users');
+    const userRecord = findUserFlexible(users, cleanId);
+    if (!userRecord) {
+      return res.status(404).json({ error: 'user_not_found', message: 'ไม่พบบัญชีผู้ใช้งานในระบบ' });
+    }
+    if (userRecord.active === false) {
+      await db.insertAuditLog({
+        eventCode: 'SSO-04',
+        actorId: userRecord.id,
+        actorEmail: userRecord.email || cleanId,
+        actorRole: userRecord.role,
+        ipAddress: clientIp,
+        targetResource: '/api/auth/otp/request',
+        details: { reason: 'inactive_account_blocked' }
+      });
+      return res.status(403).json({ error: 'account_inactive', message: 'บัญชีนี้ถูกระงับการใช้งาน (SSO-04)' });
+    }
+    if (isAdManagedAccount(userRecord)) {
+      return res.status(400).json({
+        error: 'ad_sso_required',
+        message: 'บัญชีพนักงาน AD ใช้การยืนยันตัวตนผ่าน Central IAM SSO ไม่ต้องขอรหัส OTP Local'
+      });
+    }
+
+    const challenge = await notifier.createAndSendOtpChallenge(
+      userRecord,
+      purpose === 'register' ? 'register' : 'login_2fa',
+      clientIp
+    );
+
+    res.json({
+      status: 'ok',
+      masked_email: challenge.masked_email,
+      expires_at: challenge.expires_at,
+      message: challenge.masked_email
+        ? `ส่งรหัส OTP 6 หลักไปยัง ${challenge.masked_email} และ Telegram แล้ว`
+        : 'สร้างรหัส OTP 6 หลักและแจ้งเตือนเรียบร้อยแล้ว'
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'otp_request_error', message: err.message });
+  }
+});
+
+/**
+ * First-Time Registration & Password Activation for Non-AD Local Users
+ */
+router.post('/api/auth/register-first-time', authRateLimiter, async (req, res) => {
+  try {
+    const passedGuards = await checkBotDefenseGuards(req, res, {
+      targetResource: '/api/auth/register-first-time',
+      checkTiming: true
+    });
+    if (!passedGuards) return;
+
+    const { identifier, token_or_otp, new_password } = req.body || {};
+    const cleanId = String(identifier || '').trim();
+    const code = String(token_or_otp || '').trim();
+    const pwd = String(new_password || '').trim();
+    const clientIp = getClientIp(req);
+
+    if (!cleanId || !code || !pwd) {
+      return res.status(400).json({
+        error: 'missing_fields',
+        message: 'กรุณากรอก Username, รหัสลงทะเบียน/OTP และรหัสผ่านใหม่ให้ครบถ้วน'
+      });
+    }
+
+    const s = await db.getSystemSettings();
+    const users = await db.getCollection('users');
+    const userRecord = findUserFlexible(users, cleanId);
+    if (!userRecord) {
+      return res.status(404).json({ error: 'user_not_found', message: 'ไม่พบบัญชีผู้ใช้งานในระบบ' });
+    }
+    if (userRecord.active === false) {
+      await db.insertAuditLog({
+        eventCode: 'SSO-04',
+        actorId: userRecord.id,
+        actorEmail: userRecord.email || cleanId,
+        actorRole: userRecord.role,
+        ipAddress: clientIp,
+        targetResource: '/api/auth/register-first-time',
+        details: { reason: 'inactive_account_blocked' }
+      });
+      return res.status(403).json({ error: 'account_inactive', message: 'บัญชีนี้ถูกระงับการใช้งาน (SSO-04)' });
+    }
+    if (isAdManagedAccount(userRecord)) {
+      return res.status(403).json({
+        error: 'ad_sso_required',
+        message: 'บัญชีพนักงาน AD ใช้การล็อกอินผ่าน Central IAM SSO เท่านั้น'
+      });
+    }
+
+    const nowMs = Date.now();
+    const inviteNotExpired =
+      userRecord.invite_expires_at && new Date(userRecord.invite_expires_at).getTime() > nowMs;
+    const otpNotExpired =
+      userRecord.otp_expires_at &&
+      new Date(userRecord.otp_expires_at).getTime() > nowMs &&
+      Number(userRecord.otp_attempts || 0) < 5;
+
+    const matchesInvite =
+      inviteNotExpired &&
+      (db.verifyPassword(code, userRecord.invite_token_hash) ||
+        db.verifyPassword(code, userRecord.invite_otp_hash));
+    const matchesOtp = otpNotExpired && db.verifyPassword(code, userRecord.otp_code_hash);
+
+    if (!matchesInvite && !matchesOtp) {
+      if (userRecord.otp_code_hash) {
+        await db.updateDoc(
+          'users',
+          userRecord.id,
+          { otp_attempts: Number(userRecord.otp_attempts || 0) + 1 },
+          userRecord.id
+        );
+      }
+      await db.insertAuditLog({
+        eventCode: 'OTP-FAIL',
+        actorId: userRecord.id,
+        actorEmail: userRecord.email || cleanId,
+        actorRole: userRecord.role,
+        ipAddress: clientIp,
+        targetResource: '/api/auth/register-first-time',
+        details: { reason: 'invalid_or_expired_invite_otp' }
+      });
+      return res.status(401).json({
+        error: 'invalid_or_expired_token',
+        message: 'รหัสเชิญ หรือรหัส OTP ไม่ถูกต้องหรือหมดอายุแล้ว กรุณาขอรหัสใหม่จากผู้ดูแลระบบ'
+      });
+    }
+
+    const usernameForCheck = String(userRecord.username || userRecord.uid || userRecord.id).trim();
+    const compErr = validatePasswordComplexity(pwd, usernameForCheck);
+    if (compErr) {
+      return res.status(400).json({ error: 'complexity_violation', message: compErr });
+    }
+
+    const nowIso = new Date().toISOString();
+    const updatedUser = await db.updateDoc(
+      'users',
+      userRecord.id,
+      {
+        password_hash: db.hashPassword(pwd),
+        password_changed_at: nowIso,
+        must_change_password: false,
+        registration_status: 'registered',
+        invite_token_hash: null,
+        invite_otp_hash: null,
+        invite_expires_at: null,
+        otp_code_hash: null,
+        otp_expires_at: null,
+        otp_attempts: 0,
+        otp_purpose: null
+      },
+      userRecord.id
+    );
+
+    await issueUserSession(req, res, updatedUser, {
+      authMethod: 'first_time_register',
+      mustChangePassword: false,
+      settings: s
+    });
+
+    await db.insertAuditLog({
+      eventCode: 'USER-REGISTER',
+      actorId: userRecord.id,
+      actorEmail: userRecord.email || cleanId,
+      actorRole: userRecord.role,
+      ipAddress: clientIp,
+      targetResource: `users/${userRecord.id}`,
+      details: {
+        username: usernameForCheck,
+        kind: userRecord.kind || 'external',
+        method: matchesInvite ? 'invite_token_or_otp' : 'self_service_otp'
+      }
+    });
+
+    if (userRecord.email) {
+      await notifier.sendEmailNotification({
+        to: userRecord.email,
+        subject: '[APEX] ลงทะเบียนเปิดใช้งานบัญชีเรียบร้อยแล้ว',
+        text: `บัญชีของคุณ (${usernameForCheck}) ตั้งรหัสผ่านครั้งแรกและเปิดใช้งานในระบบ APEX เรียบร้อยแล้ว`,
+        eventType: 'first_time_registration_complete',
+        actor: updatedUser,
+        ipAddress: clientIp,
+        targetResource: `users/${userRecord.id}`
+      }).catch(() => {});
+    }
+
+    if (s.telegram_enabled === 'true' && s.telegram_notify_user_provision === 'true') {
+      await notifier.sendTelegramNotification({
+        text: `<b>[APEX Onboarding]</b> ผู้ใช้ลงทะเบียนตั้งรหัสผ่านครั้งแรกสำเร็จ\n• ผู้ใช้: <b>${userRecord.name}</b> (<code>${usernameForCheck}</code>)\n• IP: <code>${clientIp}</code>`,
+        chatId: userRecord.telegram_chat_id || '',
+        eventType: 'first_time_registration_complete',
+        actor: updatedUser,
+        ipAddress: clientIp,
+        targetResource: `users/${userRecord.id}`
+      }).catch(() => {});
+    }
+
+    res.json({
+      status: 'ok',
+      message: 'ลงทะเบียนตั้งรหัสผ่านครั้งแรกสำเร็จ กำลังเข้าสู่ระบบ...',
+      must_change_password: false,
+      user: buildAuthUserProfile(updatedUser, false)
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'register_error', message: err.message });
+  }
+});
+
+/**
+ * 2FA OTP Verification Step for Local / External Logins
+ */
+router.post('/api/auth/otp/verify', authRateLimiter, async (req, res) => {
+  try {
+    const passedGuards = await checkBotDefenseGuards(req, res, {
+      targetResource: '/api/auth/otp/verify',
+      checkTiming: false
+    });
+    if (!passedGuards) return;
+
+    const { identifier, otp_code } = req.body || {};
+    const cleanId = String(identifier || '').trim();
+    const code = String(otp_code || '').trim();
+    const clientIp = getClientIp(req);
+
+    if (!cleanId || !code) {
+      return res.status(400).json({ error: 'missing_otp', message: 'กรุณากรอก Username และรหัส OTP 6 หลัก' });
+    }
+
+    const s = await db.getSystemSettings();
+    const users = await db.getCollection('users');
+    const userRecord = findUserFlexible(users, cleanId);
+    if (!userRecord) {
+      return res.status(401).json({ error: 'invalid_otp', message: 'ข้อมูลไม่ถูกต้อง' });
+    }
+    if (userRecord.active === false) {
+      await db.insertAuditLog({
+        eventCode: 'SSO-04',
+        actorId: userRecord.id,
+        actorEmail: userRecord.email || cleanId,
+        actorRole: userRecord.role,
+        ipAddress: clientIp,
+        targetResource: '/api/auth/otp/verify',
+        details: { reason: 'inactive_account_blocked' }
+      });
+      return res.status(403).json({ error: 'account_inactive', message: 'บัญชีนี้ถูกระงับการใช้งาน (SSO-04)' });
+    }
+
+    if (
+      !userRecord.otp_code_hash ||
+      !userRecord.otp_expires_at ||
+      new Date(userRecord.otp_expires_at).getTime() <= Date.now()
+    ) {
+      return res.status(401).json({
+        error: 'otp_expired',
+        message: 'รหัส OTP หมดอายุหรือยังไม่ได้ขอรหัส กรุณาขอรหัส OTP ใหม่'
+      });
+    }
+
+    const attempts = Number(userRecord.otp_attempts || 0);
+    if (attempts >= 5) {
+      return res.status(429).json({
+        error: 'otp_max_attempts',
+        message: 'กรอกรหัส OTP ผิดเกิน 5 ครั้ง กรุณาขอรหัส OTP ใหม่'
+      });
+    }
+
+    if (!db.verifyPassword(code, userRecord.otp_code_hash)) {
+      await db.updateDoc('users', userRecord.id, { otp_attempts: attempts + 1 }, userRecord.id);
+      await db.insertAuditLog({
+        eventCode: 'OTP-FAIL',
+        actorId: userRecord.id,
+        actorEmail: userRecord.email || cleanId,
+        actorRole: userRecord.role,
+        ipAddress: clientIp,
+        targetResource: '/api/auth/otp/verify',
+        details: { attempts: attempts + 1 }
+      });
+      return res.status(401).json({ error: 'invalid_otp', message: 'รหัส OTP ไม่ถูกต้อง' });
+    }
+
+    const clearedUser = await db.updateDoc(
+      'users',
+      userRecord.id,
+      { otp_code_hash: null, otp_expires_at: null, otp_attempts: 0, otp_purpose: null },
+      userRecord.id
+    );
+
+    const isAdUser = isAdManagedAccount(clearedUser);
+    let mustChangePassword = false;
+    let passwordExpired = false;
+    let daysLeft = 90;
+    if (!isAdUser) {
+      const expiry = checkPasswordExpiry90Days(clearedUser.password_changed_at, clearedUser.createdAt);
+      passwordExpired = expiry.expired;
+      daysLeft = expiry.daysLeft;
+      mustChangePassword = Boolean(clearedUser.must_change_password) || expiry.expired;
+    }
+
+    await issueUserSession(req, res, clearedUser, {
+      authMethod: 'local_otp_2fa',
+      mustChangePassword,
+      settings: s
+    });
+
+    await db.insertAuditLog({
+      eventCode: 'OTP-VERIFY',
+      actorId: clearedUser.id,
+      actorEmail: clearedUser.email || cleanId,
+      actorRole: clearedUser.role,
+      ipAddress: clientIp,
+      targetResource: '/api/auth/otp/verify',
+      details: { username: clearedUser.username || clearedUser.id }
+    });
+
+    if (s.telegram_enabled === 'true' && s.telegram_notify_login === 'true') {
+      await notifier.sendTelegramNotification({
+        text: `<b>[APEX Login 2FA OTP]</b> เข้าสู่ระบบสำเร็จ\n• ผู้ใช้: <b>${clearedUser.name}</b> (<code>${clearedUser.username || clearedUser.id}</code>)\n• IP: <code>${clientIp}</code>`,
+        eventType: 'login_otp_verified',
+        actor: clearedUser,
+        ipAddress: clientIp,
+        targetResource: '/api/auth/otp/verify'
+      }).catch(() => {});
+    }
+
+    res.json({
+      status: 'ok',
+      message: `ยืนยัน OTP และเข้าสู่ระบบสำเร็จในชื่อ ${clearedUser.name}`,
+      must_change_password: mustChangePassword,
+      password_expired: passwordExpired,
+      password_days_left: daysLeft,
+      user: buildAuthUserProfile(clearedUser, isAdUser)
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'otp_verify_error', message: err.message });
+  }
+});
+
+/**
+ * Admin Endpoint: Generate & Dispatch First-Time Registration Invite + OTP for Non-AD User
+ */
+router.post('/api/v1/users/:id/send-invite', async (req, res) => {
+  try {
+    if (!req.apexUser?.permissions?.includes('users')) {
+      return res.status(403).json({ error: 'forbidden', message: 'เฉพาะผู้ดูแลระบบเท่านั้น' });
+    }
+    const users = await db.getCollection('users');
+    const userRecord = users.find(u => u.id === req.params.id);
+    if (!userRecord) {
+      return res.status(404).json({ error: 'user_not_found', message: 'ไม่พบบัญชีผู้ใช้ที่ต้องการส่งคำเชิญ' });
+    }
+    if (isAdManagedAccount(userRecord)) {
+      return res.status(400).json({
+        error: 'ad_user_no_invite_needed',
+        message: 'บัญชีพนักงาน AD ใช้การล็อกอินผ่าน Central IAM SSO ไม่ต้องส่งลิงก์ตั้งรหัสผ่าน Local'
+      });
+    }
+
+    const invite = await notifier.createRegistrationInvite(userRecord, req.apexUser, getClientIp(req));
+    res.json({
+      status: 'ok',
+      message: `สร้างคำเชิญลงทะเบียนเข้าใช้งานครั้งแรกให้ ${userRecord.name || userRecord.id} เรียบร้อยแล้ว`,
+      username: userRecord.username || userRecord.uid || userRecord.id,
+      email: userRecord.email || '',
+      ...invite
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'invite_error', message: err.message });
   }
 });
 

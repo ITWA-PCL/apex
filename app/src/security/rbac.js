@@ -267,6 +267,9 @@ const PUBLIC_API_PATHS = new Set([
   '/api/auth/session',
   '/api/auth/sso/config',
   '/api/auth/login',
+  '/api/auth/register-first-time',
+  '/api/auth/otp/request',
+  '/api/auth/otp/verify',
   '/api/auth/sso/login',
   '/api/auth/sso/callback',
   '/api/auth/sso/logout'
@@ -480,11 +483,18 @@ function sanitizeDocForResponse(collection, doc, user) {
   const clone = { ...doc };
   if (collection === 'users') {
     clone.has_password = Boolean(doc.password_hash || doc.has_password);
+    clone.has_pending_invite = Boolean(
+      doc.invite_token_hash &&
+        (!doc.invite_expires_at || new Date(doc.invite_expires_at).getTime() > Date.now())
+    );
   }
   delete clone.password;
   delete clone.password_hash;
   delete clone.admin_password_hash;
   delete clone.client_secret;
+  delete clone.invite_token_hash;
+  delete clone.invite_otp_hash;
+  delete clone.otp_code_hash;
 
   const canSeeFinance = Boolean(user?.permissions?.includes('fin'));
   if (!canSeeFinance && collection === 'projects') {

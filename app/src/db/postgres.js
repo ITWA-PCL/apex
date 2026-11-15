@@ -103,7 +103,21 @@ const DEFAULT_SYSTEM_SETTINGS = {
   ai_model_name: 'gpt-4o-mini',
   admin_password_hash: '',
   require_login: 'true',
-  last_directory_sync_at: ''
+  last_directory_sync_at: '',
+  telegram_enabled: 'false',
+  telegram_bot_token: '',
+  telegram_chat_id: '',
+  telegram_notify_login: 'true',
+  telegram_notify_user_provision: 'true',
+  telegram_notify_security_alert: 'true',
+  email_enabled: 'false',
+  smtp_host: '',
+  smtp_port: '587',
+  smtp_user: '',
+  smtp_password: '',
+  smtp_from: 'APEX Security <noreply@windowasia.com>',
+  email_webhook_url: '',
+  login_otp_external: 'false'
 };
 
 const connectionString =
