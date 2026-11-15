@@ -465,6 +465,10 @@
           </button>
         </form>
 
+        <button type="button" class="btn sm" id="btnOpenFirstTimeRegister" style="width:100%;margin-top:10px;justify-content:center;background:#162235;color:#cbd5e1;border:1px solid #2b3e57">
+          📝 ลงทะเบียนเข้าใช้งานครั้งแรก / ยืนยันรหัส OTP (สำหรับผู้รับเหมา &amp; บัญชี Local)
+        </button>
+
         ${
           showSso
             ? `<div class="apex-sso-mobile">
@@ -489,6 +493,11 @@
       btn.addEventListener('click', () => {
         window.location.href = '/api/auth/sso/login';
       });
+    });
+
+    overlay.querySelector('#btnOpenFirstTimeRegister')?.addEventListener('click', () => {
+      const currentId = overlay.querySelector('#apexLoginIdentifier')?.value || '';
+      renderFirstTimeRegistrationModal({ username: currentId });
     });
 
     overlay.querySelector('#apexLocalLoginForm')?.addEventListener('submit', async e => {
@@ -520,6 +529,17 @@
         });
         const out = await res.json();
         if (!res.ok) {
+          if (res.status === 403 && out.error === 'registration_required') {
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.textContent = 'เข้าสู่ระบบ (Sign In) →';
+            }
+            renderFirstTimeRegistrationModal({
+              username: out.username || identifier,
+              notice: out.message
+            });
+            return;
+          }
           if (errBox) {
             errBox.textContent = out.message || 'ไม่สามารถเข้าสู่ระบบได้';
             errBox.hidden = false;
@@ -528,6 +548,14 @@
             submitBtn.disabled = false;
             submitBtn.textContent = 'เข้าสู่ระบบ (Sign In) →';
           }
+          return;
+        }
+
+        if (out.otp_required) {
+          overlay.hidden = true;
+          renderLoginOtpModal(out.identifier || identifier, out.masked_email || '', () => {
+            window.location.reload();
+          });
           return;
         }
 
@@ -563,6 +591,313 @@
     });
   }
 
+  function renderComplexityChecklistHtml() {
+    return `
+      <div class="apex-pwd-checklist">
+        <div style="font-weight:600;color:#c9d6e3;margin-bottom:4px">ข้อกำหนดความปลอดภัยของรหัสผ่าน (Complexity):</div>
+        <div data-chk="len" class="apex-pwd-check-item"><span>•</span> ความยาว 8 ถึง 16 ตัวอักษร</div>
+        <div data-chk="upper" class="apex-pwd-check-item"><span>•</span> ตัวอักษรพิมพ์ใหญ่ (A-Z) อย่างน้อย 1 ตัว</div>
+        <div data-chk="lower" class="apex-pwd-check-item"><span>•</span> ตัวอักษรพิมพ์เล็ก (a-z) อย่างน้อย 1 ตัว</div>
+        <div data-chk="digit" class="apex-pwd-check-item"><span>•</span> ตัวเลข (0-9) อย่างน้อย 1 ตัว</div>
+        <div data-chk="special" class="apex-pwd-check-item"><span>•</span> อักขระพิเศษ (!@#$%^&*...) อย่างน้อย 1 ตัว</div>
+        <div data-chk="nouser" class="apex-pwd-check-item"><span>•</span> ไม่มีชื่อผู้ใช้ (Username) ในรหัสผ่าน</div>
+      </div>
+    `;
+  }
+
+  function evaluateComplexityChecklist(modal, pwd, confirmPwd, usernameRaw, extraReady) {
+    const p = pwd || '';
+    const c = confirmPwd || '';
+    const u = String(usernameRaw || '').trim();
+    const checks = {
+      len: p.length >= 8 && p.length <= 16,
+      upper: /[A-Z]/.test(p),
+      lower: /[a-z]/.test(p),
+      digit: /[0-9]/.test(p),
+      special: /[!@#$%^&*()_+\-=\[\]{}|;:,.<>?/~`]/.test(p),
+      nouser: !u || u.length < 3 || !p.toLowerCase().includes(u.toLowerCase())
+    };
+    Object.entries(checks).forEach(([k, valid]) => {
+      const el = modal.querySelector(`[data-chk="${k}"]`);
+      if (el) el.className = 'apex-pwd-check-item' + (valid ? ' valid' : '');
+    });
+    return Boolean(
+      checks.len &&
+        checks.upper &&
+        checks.lower &&
+        checks.digit &&
+        checks.special &&
+        checks.nouser &&
+        p &&
+        p === c &&
+        extraReady
+    );
+  }
+
+  function renderFirstTimeRegistrationModal(prefill = {}) {
+    let modal = document.getElementById('apex-first-register-modal');
+    if (modal) modal.remove();
+
+    modal = document.createElement('div');
+    modal.id = 'apex-first-register-modal';
+    modal.className = 'apex-pwd-modal-overlay noprint';
+    const modalRenderTs = Date.now();
+
+    modal.innerHTML = `
+      <div class="apex-pwd-modal-card">
+        <div class="apex-modal-head" style="margin-bottom:8px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:22px">📝</span>
+            <h2 style="font-size:16px;font-weight:700;margin:0;color:#f0f6fc">ลงทะเบียนเข้าใช้งานครั้งแรก &amp; ตั้งรหัสผ่าน</h2>
+          </div>
+          <button type="button" class="apex-modal-close" id="btnCloseRegModal" aria-label="ปิด">✕ ปิด</button>
+        </div>
+        <p style="font-size:12px;color:#8b9bb0;margin:0 0 12px;line-height:1.5">
+          สำหรับผู้รับเหมาช่วง ลูกค้า หรือพนักงานที่ไม่มีบัญชี AD — กรอก Username หรืออีเมล พร้อมรหัสเชิญ/OTP 6 หลัก เพื่อตั้งรหัสผ่านเข้าใช้งานครั้งแรก
+        </p>
+
+        <div id="apexRegError" class="apex-login-error" ${prefill.notice ? '' : 'hidden'}>${esc(prefill.notice || '')}</div>
+        <div id="apexRegSuccess" style="background:rgba(63,185,80,0.12);border:1px solid rgba(63,185,80,0.45);color:#7ee787;padding:8px 10px;border-radius:8px;font-size:12px;margin-bottom:10px" hidden></div>
+
+        ${renderComplexityChecklistHtml()}
+
+        <form id="apexFirstRegForm">
+          <label class="apex-login-field">
+            <span>Username หรือ อีเมล *</span>
+            <input type="text" id="apexRegIdentifier" required value="${esc(prefill.username || '')}" placeholder="เช่น contractor01 หรืออีเมลที่ลงทะเบียน">
+          </label>
+          <div class="apex-login-field">
+            <span>รหัสเชิญ หรือ รหัส OTP 6 หลัก *</span>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input type="text" id="apexRegTokenOrOtp" required value="${esc(prefill.token || '')}" placeholder="รหัส OTP 6 หลัก หรือ Invite Token" style="flex:1">
+              <button type="button" class="btn sm" id="btnRegRequestOtp" style="white-space:nowrap">📨 ขอรหัส OTP</button>
+            </div>
+          </div>
+          <label class="apex-login-field">
+            <span>กำหนดรหัสผ่านใหม่ (New Password) *</span>
+            <div class="apex-pwd-wrap">
+              <input type="password" id="apexRegNewPwd" maxlength="16" required placeholder="8-16 ตัวอักษร" autocomplete="new-password">
+              <button type="button" class="apex-pwd-toggle" data-pwd-target="apexRegNewPwd" aria-label="แสดงรหัสผ่าน">👁️</button>
+            </div>
+          </label>
+          <label class="apex-login-field">
+            <span>ยืนยันรหัสผ่านใหม่ (Confirm Password) *</span>
+            <div class="apex-pwd-wrap">
+              <input type="password" id="apexRegConfirmPwd" maxlength="16" required placeholder="กรอกรหัสผ่านใหม่อีกครั้ง" autocomplete="new-password">
+              <button type="button" class="apex-pwd-toggle" data-pwd-target="apexRegConfirmPwd" aria-label="แสดงรหัสผ่าน">👁️</button>
+            </div>
+          </label>
+          <button type="submit" class="apex-login-submit" id="btnSubmitFirstReg" disabled style="opacity:0.55">
+            ยืนยันลงทะเบียนและเข้าสู่ระบบ →
+          </button>
+        </form>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+    bindPasswordToggles(modal);
+
+    modal.querySelector('#btnCloseRegModal')?.addEventListener('click', () => modal.remove());
+
+    const idInput = modal.querySelector('#apexRegIdentifier');
+    const tokInput = modal.querySelector('#apexRegTokenOrOtp');
+    const pwdInput = modal.querySelector('#apexRegNewPwd');
+    const confirmInput = modal.querySelector('#apexRegConfirmPwd');
+    const submitBtn = modal.querySelector('#btnSubmitFirstReg');
+    const errBox = modal.querySelector('#apexRegError');
+    const okBox = modal.querySelector('#apexRegSuccess');
+
+    function syncRegChecklist() {
+      const ok = evaluateComplexityChecklist(
+        modal,
+        pwdInput.value,
+        confirmInput.value,
+        idInput.value,
+        Boolean(idInput.value.trim() && tokInput.value.trim())
+      );
+      submitBtn.disabled = !ok;
+      submitBtn.style.opacity = ok ? '1' : '0.55';
+    }
+    [idInput, tokInput, pwdInput, confirmInput].forEach(el =>
+      el.addEventListener('input', syncRegChecklist)
+    );
+    syncRegChecklist();
+
+    modal.querySelector('#btnRegRequestOtp')?.addEventListener('click', async () => {
+      errBox.hidden = true;
+      okBox.hidden = true;
+      const identifier = idInput.value.trim();
+      if (!identifier) {
+        errBox.textContent = 'กรุณากรอก Username หรืออีเมลก่อนขอรหัส OTP';
+        errBox.hidden = false;
+        return;
+      }
+      const reqBtn = modal.querySelector('#btnRegRequestOtp');
+      reqBtn.disabled = true;
+      reqBtn.textContent = 'กำลังส่ง...';
+      try {
+        const res = await fetch('/api/auth/otp/request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ identifier, purpose: 'register' })
+        });
+        const out = await res.json();
+        if (!res.ok) {
+          errBox.textContent = out.message || 'ไม่สามารถส่งรหัส OTP ได้';
+          errBox.hidden = false;
+        } else {
+          okBox.textContent = out.message || 'ส่งรหัส OTP 6 หลักแล้ว';
+          okBox.hidden = false;
+        }
+      } catch (_) {
+        errBox.textContent = 'เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์';
+        errBox.hidden = false;
+      } finally {
+        reqBtn.disabled = false;
+        reqBtn.textContent = '📨 ขอรหัส OTP';
+      }
+    });
+
+    modal.querySelector('#apexFirstRegForm').addEventListener('submit', async e => {
+      e.preventDefault();
+      errBox.hidden = true;
+      okBox.hidden = true;
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'กำลังลงทะเบียนและตรวจสอบรหัส...';
+
+      try {
+        const res = await fetch('/api/auth/register-first-time', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            identifier: idInput.value.trim(),
+            token_or_otp: tokInput.value.trim(),
+            new_password: pwdInput.value,
+            form_render_ts: modalRenderTs
+          })
+        });
+        const out = await res.json();
+        if (!res.ok) {
+          errBox.textContent = out.message || 'ลงทะเบียนไม่สำเร็จ';
+          errBox.hidden = false;
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'ยืนยันลงทะเบียนและเข้าสู่ระบบ →';
+          return;
+        }
+        try {
+          if (window.location.search.includes('register_token')) {
+            window.history.replaceState({}, '', window.location.pathname);
+          }
+        } catch (_) {}
+        modal.remove();
+        window.location.reload();
+      } catch (_) {
+        errBox.textContent = 'เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์';
+        errBox.hidden = false;
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'ยืนยันลงทะเบียนและเข้าสู่ระบบ →';
+      }
+    });
+  }
+
+  function renderLoginOtpModal(identifier, maskedEmail, onDone) {
+    let modal = document.getElementById('apex-login-otp-modal');
+    if (modal) modal.remove();
+
+    modal = document.createElement('div');
+    modal.id = 'apex-login-otp-modal';
+    modal.className = 'apex-pwd-modal-overlay noprint';
+
+    modal.innerHTML = `
+      <div class="apex-pwd-modal-card">
+        <div class="apex-modal-head" style="margin-bottom:8px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:22px">🔐</span>
+            <h2 style="font-size:16px;font-weight:700;margin:0;color:#f0f6fc">ยืนยันตัวตน 2 ชั้นด้วยรหัส OTP</h2>
+          </div>
+          <button type="button" class="apex-modal-close" id="btnCancelLoginOtp">← กลับ</button>
+        </div>
+        <p style="font-size:12px;color:#8b9bb0;margin:0 0 12px;line-height:1.5">
+          ระบบได้ส่งรหัส OTP 6 หลักสำหรับบัญชี <code>${esc(identifier)}</code> ไปยัง ${maskedEmail ? `<code>${esc(maskedEmail)}</code> และ ` : ''}Telegram แล้ว (มีอายุ 5 นาที)
+        </p>
+        <div id="apexLoginOtpError" class="apex-login-error" hidden></div>
+        <form id="apexLoginOtpForm">
+          <label class="apex-login-field">
+            <span>รหัส OTP 6 หลัก *</span>
+            <input type="text" id="apexLoginOtpCode" maxlength="6" inputmode="numeric" required placeholder="กรอกรหัส 6 หลัก" style="text-align:center;font-size:18px;letter-spacing:6px">
+          </label>
+          <button type="submit" class="apex-login-submit" id="btnVerifyLoginOtp">ยืนยันรหัส OTP →</button>
+        </form>
+        <button type="button" class="btn sm" id="btnResendLoginOtp" style="width:100%;margin-top:10px;justify-content:center;background:#162235;color:#cbd5e1;border:1px solid #2b3e57">
+          🔄 ขอรหัส OTP ใหม่
+        </button>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+    const errBox = modal.querySelector('#apexLoginOtpError');
+    const codeInput = modal.querySelector('#apexLoginOtpCode');
+    const verifyBtn = modal.querySelector('#btnVerifyLoginOtp');
+
+    modal.querySelector('#btnCancelLoginOtp')?.addEventListener('click', () => {
+      modal.remove();
+      renderLoginOverlay();
+    });
+
+    modal.querySelector('#btnResendLoginOtp')?.addEventListener('click', async () => {
+      errBox.hidden = true;
+      try {
+        const res = await fetch('/api/auth/otp/request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ identifier, purpose: 'login_2fa' })
+        });
+        const out = await res.json();
+        if (!res.ok) {
+          errBox.textContent = out.message || 'ไม่สามารถขอรหัส OTP ใหม่ได้';
+          errBox.hidden = false;
+        }
+      } catch (_) {
+        errBox.textContent = 'เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์';
+        errBox.hidden = false;
+      }
+    });
+
+    modal.querySelector('#apexLoginOtpForm')?.addEventListener('submit', async e => {
+      e.preventDefault();
+      errBox.hidden = true;
+      verifyBtn.disabled = true;
+      verifyBtn.textContent = 'กำลังตรวจสอบรหัส OTP...';
+
+      try {
+        const res = await fetch('/api/auth/otp/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ identifier, otp_code: codeInput.value.trim() })
+        });
+        const out = await res.json();
+        if (!res.ok) {
+          errBox.textContent = out.message || 'รหัส OTP ไม่ถูกต้อง';
+          errBox.hidden = false;
+          verifyBtn.disabled = false;
+          verifyBtn.textContent = 'ยืนยันรหัส OTP →';
+          return;
+        }
+        modal.remove();
+        if (out.must_change_password) {
+          renderForcedPasswordChangeModal(out.user, out.password_days_left, onDone, { forced: true });
+          return;
+        }
+        if (typeof onDone === 'function') onDone();
+      } catch (_) {
+        errBox.textContent = 'เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์';
+        errBox.hidden = false;
+        verifyBtn.disabled = false;
+        verifyBtn.textContent = 'ยืนยันรหัส OTP →';
+      }
+    });
+  }
+
   function renderForcedPasswordChangeModal(user, daysLeft, onDone, options = {}) {
     const isForced = options.forced !== false;
     let modal = document.getElementById('apex-pwd-change-modal');
@@ -590,15 +925,7 @@
 
         <div id="apexPwdModalError" class="apex-login-error" hidden></div>
 
-        <div class="apex-pwd-checklist">
-          <div style="font-weight:600;color:#c9d6e3;margin-bottom:4px">ข้อกำหนดความปลอดภัยของรหัสผ่าน (Complexity):</div>
-          <div id="chkLen" class="apex-pwd-check-item"><span>•</span> ความยาว 8 ถึง 16 ตัวอักษร</div>
-          <div id="chkUpper" class="apex-pwd-check-item"><span>•</span> ตัวอักษรพิมพ์ใหญ่ (A-Z) อย่างน้อย 1 ตัว</div>
-          <div id="chkLower" class="apex-pwd-check-item"><span>•</span> ตัวอักษรพิมพ์เล็ก (a-z) อย่างน้อย 1 ตัว</div>
-          <div id="chkDigit" class="apex-pwd-check-item"><span>•</span> ตัวเลข (0-9) อย่างน้อย 1 ตัว</div>
-          <div id="chkSpecial" class="apex-pwd-check-item"><span>•</span> อักขระพิเศษ (!@#$%^&*...) อย่างน้อย 1 ตัว</div>
-          <div id="chkNoUser" class="apex-pwd-check-item"><span>•</span> ไม่มีชื่อผู้ใช้ (Username) ในรหัสผ่าน</div>
-        </div>
+        ${renderComplexityChecklistHtml()}
 
         <form id="apexForcedPwdForm">
           <label class="apex-login-field">
@@ -645,25 +972,13 @@
     const username = String(user?.username || user?.uid || emailPrefix || user?.id || '').trim();
 
     function updateChecklist() {
-      const p = newPwdInput.value || '';
-      const c = confirmPwdInput.value || '';
-
-      const isLen = p.length >= 8 && p.length <= 16;
-      const isUpper = /[A-Z]/.test(p);
-      const isLower = /[a-z]/.test(p);
-      const isDigit = /[0-9]/.test(p);
-      const isSpecial = /[!@#$%^&*()_+\-=\[\]{}|;:,.<>?/~`]/.test(p);
-      const isNoUser = !username || username.length < 3 || !p.toLowerCase().includes(username.toLowerCase());
-      const isMatch = p && p === c;
-
-      modal.querySelector('#chkLen').className = 'apex-pwd-check-item' + (isLen ? ' valid' : '');
-      modal.querySelector('#chkUpper').className = 'apex-pwd-check-item' + (isUpper ? ' valid' : '');
-      modal.querySelector('#chkLower').className = 'apex-pwd-check-item' + (isLower ? ' valid' : '');
-      modal.querySelector('#chkDigit').className = 'apex-pwd-check-item' + (isDigit ? ' valid' : '');
-      modal.querySelector('#chkSpecial').className = 'apex-pwd-check-item' + (isSpecial ? ' valid' : '');
-      modal.querySelector('#chkNoUser').className = 'apex-pwd-check-item' + (isNoUser ? ' valid' : '');
-
-      const allValid = isLen && isUpper && isLower && isDigit && isSpecial && isNoUser && isMatch && oldPwdInput.value;
+      const allValid = evaluateComplexityChecklist(
+        modal,
+        newPwdInput.value,
+        confirmPwdInput.value,
+        username,
+        Boolean(oldPwdInput.value)
+      );
       submitBtn.disabled = !allValid;
       submitBtn.style.opacity = allValid ? '1' : '0.55';
     }
@@ -1008,6 +1323,73 @@
               </label>
             </div>
           </div>
+
+          <!-- Card 3: Telegram Bot & Email / OTP Notification Settings -->
+          <div class="card" style="grid-column:1/-1">
+            <div class="card-head">
+              <div>
+                <h2>3. ระบบแจ้งเตือน Telegram Bot, Email / SMTP และ OTP (ISO 27001 Alerts &amp; Onboarding)</h2>
+                <span class="sub">ส่งลิงก์ลงทะเบียนครั้งแรก + รหัส OTP 6 หลักสำหรับผู้ใช้ External / Non-AD และแจ้งเตือนเหตุการณ์ความปลอดภัยลง Telegram</span>
+              </div>
+              <div class="row" style="gap:8px">
+                <button type="button" class="btn sm" id="btnTestTelegram">📨 ทดสอบ Telegram</button>
+                <button type="button" class="btn sm" id="btnTestEmail">✉️ ทดสอบ Email</button>
+              </div>
+            </div>
+            <div class="form-grid" style="margin-top:10px">
+              <label class="row" style="gap:8px;grid-column:1/-1">
+                <input type="checkbox" name="telegram_enabled" ${s.telegram_enabled ? 'checked' : ''} style="width:18px;height:18px">
+                <strong>เปิดใช้งานแจ้งเตือนผ่าน Telegram Bot (Audit Alerts, Login, User Invite/Register)</strong>
+              </label>
+              <label>Telegram Bot Token
+                <input type="password" name="telegram_bot_token" placeholder="${esc(s.telegram_bot_token_masked || 'เช่น 123456:ABC-DEF... (เว้นว่างหากไม่เปลี่ยน)')}">
+              </label>
+              <label>Telegram Default Chat ID / Group ID
+                <input type="text" name="telegram_chat_id" value="${esc(s.telegram_chat_id || '')}" placeholder="เช่น -1001234567890 หรือ 123456789">
+              </label>
+              <label class="row" style="gap:8px">
+                <input type="checkbox" name="telegram_notify_login" ${s.telegram_notify_login !== false ? 'checked' : ''} style="width:18px;height:18px">
+                <span>แจ้งเตือนเมื่อมีการเข้าสู่ระบบ (Login)</span>
+              </label>
+              <label class="row" style="gap:8px">
+                <input type="checkbox" name="telegram_notify_user_provision" ${s.telegram_notify_user_provision !== false ? 'checked' : ''} style="width:18px;height:18px">
+                <span>แจ้งเตือนเมื่อเชิญ/ลงทะเบียนผู้ใช้ใหม่</span>
+              </label>
+              <label class="row" style="gap:8px;grid-column:1/-1">
+                <input type="checkbox" name="telegram_notify_security_alert" ${s.telegram_notify_security_alert !== false ? 'checked' : ''} style="width:18px;height:18px">
+                <span>แจ้งเตือน Security Alerts ทันที (AD Blocked, Account Locked, OTP Fail, Break-Glass)</span>
+              </label>
+
+              <hr style="grid-column:1/-1;border:0;border-top:1px solid var(--line);margin:8px 0">
+
+              <label class="row" style="gap:8px;grid-column:1/-1">
+                <input type="checkbox" name="email_enabled" ${s.email_enabled ? 'checked' : ''} style="width:18px;height:18px">
+                <strong>เปิดใช้งานส่ง Email อัตโนมัติ (Invite / OTP / External Notification)</strong>
+              </label>
+              <label>SMTP Host
+                <input type="text" name="smtp_host" value="${esc(s.smtp_host || '')}" placeholder="เช่น smtp.office365.com หรือ smtp.gmail.com">
+              </label>
+              <label>SMTP Port
+                <input type="number" name="smtp_port" min="1" max="65535" value="${Number(s.smtp_port || 587)}">
+              </label>
+              <label>SMTP Username
+                <input type="text" name="smtp_user" value="${esc(s.smtp_user || '')}" placeholder="noreply@windowasia.com">
+              </label>
+              <label>SMTP Password / App Password
+                <input type="password" name="smtp_password" placeholder="${esc(s.smtp_password_masked || 'เว้นว่างหากไม่ต้องการเปลี่ยนรหัส SMTP')}">
+              </label>
+              <label>ชื่อ/อีเมลผู้ส่ง (From Address)
+                <input type="text" name="smtp_from" value="${esc(s.smtp_from || 'APEX Security <noreply@windowasia.com>')}">
+              </label>
+              <label>Email Webhook URL (ทางเลือก — ส่งแทน/เสริม SMTP)
+                <input type="url" name="email_webhook_url" value="${esc(s.email_webhook_url || '')}" placeholder="https://relay.windowasia.com/hooks/email">
+              </label>
+              <label class="row" style="gap:8px;grid-column:1/-1">
+                <input type="checkbox" name="login_otp_external" ${s.login_otp_external ? 'checked' : ''} style="width:18px;height:18px">
+                <strong>บังคับตรวจ 2FA OTP ทาง Email/Telegram ทุกครั้งเมื่อผู้รับเหมา/ลูกค้า (External) เข้าสู่ระบบ</strong>
+              </label>
+            </div>
+          </div>
         </div>
 
         <div class="card" style="margin-top:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
@@ -1069,9 +1451,19 @@
       e.preventDefault();
       const fd = new FormData(form);
       const body = Object.fromEntries(fd.entries());
-      body.ciam_enabled = Boolean(form.querySelector('[name=ciam_enabled]')?.checked);
-      body.require_login = Boolean(form.querySelector('[name=require_login]')?.checked);
-      body.ai_copilot_enabled = Boolean(form.querySelector('[name=ai_copilot_enabled]')?.checked);
+      [
+        'ciam_enabled',
+        'require_login',
+        'ai_copilot_enabled',
+        'telegram_enabled',
+        'telegram_notify_login',
+        'telegram_notify_user_provision',
+        'telegram_notify_security_alert',
+        'email_enabled',
+        'login_otp_external'
+      ].forEach(k => {
+        body[k] = Boolean(form.querySelector(`[name=${k}]`)?.checked);
+      });
 
       const res = await fetch('/api/settings/ciam-sso', {
         method: 'POST',
@@ -1092,6 +1484,35 @@
       const out = await res.json();
       if (msgEl) msgEl.textContent = out.message || `เชื่อมต่อสำเร็จ: ${out.issuer || out.discovery_url}`;
       if (typeof window.toast === 'function') window.toast(out.message || 'ทดสอบ OIDC สำเร็จ');
+    });
+
+    container.querySelector('#btnTestTelegram')?.addEventListener('click', async () => {
+      const msgEl = container.querySelector('#ciamStatusMsg');
+      const chatId = form?.querySelector('[name=telegram_chat_id]')?.value?.trim() || undefined;
+      if (msgEl) msgEl.textContent = 'กำลังส่งข้อความทดสอบไปยัง Telegram Bot...';
+      const res = await fetch('/api/settings/notifications/test-telegram', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId })
+      });
+      const out = await res.json();
+      if (msgEl) msgEl.textContent = out.message || 'ทดสอบ Telegram สำเร็จ';
+      if (typeof window.toast === 'function') window.toast(out.message || 'ทดสอบ Telegram เสร็จสิ้น');
+    });
+
+    container.querySelector('#btnTestEmail')?.addEventListener('click', async () => {
+      const msgEl = container.querySelector('#ciamStatusMsg');
+      const to = window.prompt('ระบุอีเมลปลายทางสำหรับทดสอบส่งแจ้งเตือน (ปล่อยว่างเพื่อใช้อีเมลของคุณ):', sessionInfo?.user?.email || '');
+      if (to === null) return;
+      if (msgEl) msgEl.textContent = 'กำลังส่งอีเมลทดสอบ...';
+      const res = await fetch('/api/settings/notifications/test-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: to.trim() || undefined })
+      });
+      const out = await res.json();
+      if (msgEl) msgEl.textContent = out.message || 'ทดสอบ Email สำเร็จ';
+      if (typeof window.toast === 'function') window.toast(out.message || 'ทดสอบ Email เสร็จสิ้น');
     });
 
     container.querySelector('#btnSyncCiamNow')?.addEventListener('click', async () => {
@@ -1220,6 +1641,14 @@
     renderLoginOverlay();
     injectSidebarAndTopBar();
     initCopilotWidget();
+    const urlParams = new URLSearchParams(window.location.search || '');
+    if (!sessionInfo?.authenticated && urlParams.has('register_token')) {
+      renderFirstTimeRegistrationModal({
+        username: urlParams.get('username') || '',
+        token: urlParams.get('register_token') || '',
+        notice: 'กรุณาตั้งรหัสผ่านใหม่เพื่อยืนยันตัวตนและเปิดใช้งานบัญชีครั้งแรก'
+      });
+    }
     if (
       sessionInfo?.authenticated &&
       sessionInfo?.user?.must_change_password &&

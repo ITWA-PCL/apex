@@ -8,28 +8,28 @@
 
 ## Latest Handoff Status (จุดพักงานล่าสุด — พร้อมกลับมาทำต่อได้ทันที)
 
-- **วันที่ / เวลาบันทึกส่งมอบ:** `2026-11-15 11:12 (+07:00)`
+- **วันที่ / เวลาบันทึกส่งมอบ:** `2026-11-15 13:26 (+07:00)`
 - **ผู้ส่งมอบงานล่าสุด:** Lead Security & Core Architect (คุณ — Track A ร่วมกับ Antigravity AI)
 - **ชื่อโปรเจกต์หลัก:** **APEX** (`https://apex.windowasia.com` — ระบบควบคุมงานติดตั้งประตู-หน้าต่าง)
 - **โฟลเดอร์หลักของโปรเจกต์บนเครื่อง Local (ทั้งเครื่องคุณและเครื่อง CFO):** **`D:\Python\APEX`**
 - **โฟลเดอร์ Production บน Hostinger VPS:** **`/var/www/Apex`**
 - **Git Remote ของบริษัท:** `https://github.com/ITWA-PCL/apex.git`
 - **Git Branch & Commit ล่าสุด:**
-  - Branch งาน Security ล่าสุดของคุณ (Track A): **`Sec1`** (ต่อยอดจาก `8477d45` และ `origin/main` ที่ `4a92ab1`)
-  - **แพตช์ล่าสุดบน `Sec1` (Enterprise User Management, Login UX, Session Persistence & Group C/D Sync):**
-    - `app/src/db/postgres.js`: เพิ่มตาราง `active_sessions` (พร้อม fallback store), ฟังก์ชัน `saveSession`/`getSession`/`deleteSession`/`deleteUserSessions`, ค่าเริ่มต้น `ciam_auto_provision_group` (`'viewer'`) และ `ciam_session_ttl_minutes` (`'480'`), และฟิลด์ `username`/`department`/`status_origin` ใน `U01`
-    - `app/src/security/rbac.js`: รองรับกู้คืน Session จาก PostgreSQL/Fallback ผ่าน `resolveRequestUser`, เพิ่ม `findMatchingUser` & `revokeUserSessions`, และเปิดเผย `has_password` ใน `sanitizeDocForResponse` โดยไม่รั่ว `password_hash`
-    - `app/src/security/ciam.js`: เพิ่ม `; Secure` cookie flag บน HTTPS, ปรับ `/api/auth/login` รองรับ `username` case-insensitive + Break-Glass AD Gateway fallback + server-side `lastSeen`/`last_login_at`, ปรับ `change-password` ตรวจเทียบ `username`, ปรับ Group C (`/api/v1/directory/accounts*`) ตาม Spec C.1/C.2 (`summary`, filters, `409`), และ Group D Immediate Sync (`FULL_SYNC` heartbeat + fallback)
-    - `app/src/workflow/collections-api.js`: เพิ่ม `prepareUserMutation` & `finalizeMutationSideEffects` ตรวจ `username` ไม่ซ้ำ, บังคับ Password Complexity 8–16 ตัวอักษร, ล็อกสถานะ `is_status_locked` (`409` + `SPOKE_OVERRIDE_REJECTED`), ตัด Session ทันทีเมื่อระงับ/ลบผู้ใช้ (`revokeUserSessions`), และบันทึก Audit Log (`USER-CREATE`, `SSO-04`, `PW-RESET`, `USER-ACTIVATE`, `USER-UPDATE`, `ROLE-UPDATE`)
-    - `app/public/js/ciam-admin-panel.js` & `app/public/js/apex-cloud-bridge.js`: ปรับ Login Gate แบบ State-Driven & Responsive ตาม CIAM Spec §5.2, ปุ่ม 👁️ แสดง/ซ่อนรหัสผ่าน, ปุ่ม `🔑 เปลี่ยนรหัสผ่าน` บน Topbar สำหรับบัญชี Local, ตัวเลือก `ciam_auto_provision_group` & `ciam_session_ttl_minutes` ในหน้า Settings, 401 Expiry Interceptor (`window.__APEX_ON_401__`), และป้องกันค้างรหัสผ่านใน Optimistic Client Store
-    - `app/public/index.html`: ปรับหน้า `#v-users` ให้จัดการ `username`, `department`, `use_ad_auth` (AD SSO vs Local), ตั้งรหัสผ่าน Local, `must_change_password`, แสดงสถานะ `is_status_locked`, ถอด checkbox `mine` เดิมออก, อัปเดต `demoData` (`U01`–`U10`), และแสดง error จาก server ใน `toast` (ไม่แตะต้อง `PKEYS`, `ROLE_DEF`, `EXT_DENY` หรือ Business Process Flow)
-    - `scripts/verify-local.js`: เพิ่ม **Section 11** ทดสอบ Username Login, Persistent DB Session, Password Complexity, Immediate Session Revocation, `409 status_locked`, และ Group C Spec C.1/C.2
-  - Commit ก่อนหน้าบน `Sec1`: **`8477d45`** (`fix(sso)`), **`393efef`** (`fix(security)`)
-  - Branch กลางของทีม (`main` / `origin/main`): **`4a92ab1`** (`Merge pull request #3 from ITWA-PCL/Sec1`)
-  - Branch ของ CFO (Track B): `feat/flow-cfo` (แตกจาก `main` และเริ่มพัฒนาแล้ว)
+  - Branch งาน Security ล่าสุดของคุณ (Track A): **`Sec1`** (ต่อยอดจาก PR #6 `8cb2bd4` และ `origin/main`)
+  - **แพตช์ล่าสุดบน `Sec1` (T2.10: มาตรฐานบัญชี 3 ประเภท, Invite/Register, 2FA OTP, Telegram Bot & Email Settings — ISO 27001 & CIAM):**
+    - `app/src/db/postgres.js`: เพิ่มค่าตั้งต้น 14 รายการใน `DEFAULT_SYSTEM_SETTINGS` สำหรับ `telegram_*` (`telegram_enabled`, `telegram_bot_token`, `telegram_chat_id`, `telegram_notify_login`, `telegram_notify_user_provision`, `telegram_notify_security_alert`), `email_*`/`smtp_*`, และ `login_otp_external`
+    - `app/src/security/notifier.js`: สร้างโมดูลแจ้งเตือน Zero-Dependency (`crypto`, `net`, `tls`, `fetch`) รองรับ Telegram Bot API (`NOTIFY-TELEGRAM`), Email Webhook + Native SMTP TLS/STARTTLS (`NOTIFY-EMAIL`), การสร้างคำเชิญลงทะเบียนครั้งแรก (`createRegistrationInvite` + `USER-INVITE` อายุ 24 ชม.), และ OTP 6 หลัก (`createAndSendOtpChallenge` + `OTP-SEND` อายุ 5 นาที)
+    - `app/src/security/rbac.js`: เพิ่ม `/api/auth/register-first-time`, `/api/auth/otp/request`, `/api/auth/otp/verify` ใน `PUBLIC_API_PATHS` และคัดกรอง `invite_token_hash`, `invite_otp_hash`, `otp_code_hash` ออกจาก `sanitizeDocForResponse` (เปิดเผยเฉพาะ `has_pending_invite`)
+    - `app/src/security/ciam.js`: อัปเดต Group A (`/api/settings/ciam-sso` GET/POST) สำหรับค่า Telegram/Email/OTP พร้อม Mask Secrets (`telegram_bot_token_masked`, `smtp_password_masked`), เพิ่ม `POST /api/settings/notifications/test-telegram` & `test-email`, บังคับกฎ 3 ประเภทใน `POST /api/auth/login` (`403 ad_sso_required` + `SSO-02`, `403 registration_required`, `200 otp_required`), และเพิ่ม `/api/auth/otp/request`, `/api/auth/register-first-time` (`USER-REGISTER`), `/api/auth/otp/verify` (`OTP-VERIFY`/`OTP-FAIL`), `/api/v1/users/:id/send-invite`
+    - `app/src/workflow/collections-api.js`: ปรับ `prepareUserMutation` & `finalizeMutationSideEffects` ให้บังคับ `use_ad_auth: false` สำหรับ `external` เสมอ, ล้าง `password_hash` บน `active_ad`, รองรับ `telegram_chat_id`/`otp_enabled`/`send_invite`, และส่งคำเชิญอัตโนมัติเมื่อสร้างบัญชี Non-AD ที่ยังไม่กำหนดรหัสผ่าน
+    - `app/public/js/ciam-admin-panel.js`: เพิ่ม Card 3 ในหน้า Settings (`#v-settings`) สำหรับ **Telegram Bot & Email/OTP** พร้อมปุ่มทดสอบ `#btnTestTelegram` / `#btnTestEmail`, เพิ่ม `renderFirstTimeRegistrationModal` (รองรับเปิดอัตโนมัติจาก `?register_token=...`) และ `renderLoginOtpModal`
+    - `app/public/index.html`: ปรับหน้า `#v-users` (`usersHtml`, `userForm`, `saveUser`, `userEvents`) ให้มี `email` (Required), `telegram_chat_id`, แยกป้าย 3 ประเภท (`🔐 Internal · AD Only`, `🔑 Internal · Local`, `👷 External · Local`) + `⏳ รอลงทะเบียนครั้งแรก` + `🔒 2FA OTP`, ล็อก Auth สำหรับ `external`, และปุ่ม `📨 ส่งคำเชิญ/OTP` พร้อมหน้าต่างแสดงลิงก์/รหัส OTP
+    - `scripts/verify-local.js`: เพิ่ม `'app/src/security/notifier.js'` และ **Section 12** ทดสอบ 3-tier classification, AD-only block, `send-invite` + `register-first-time`, 2FA OTP flow, Telegram/Email Settings & Secret Masking
+  - **แพตช์ก่อนหน้าบน `Sec1` (PR #6 `8cb2bd4`):** Persistent Session `active_sessions`, `ciam_auto_provision_group`, `ciam_session_ttl_minutes`, Responsive Login Gate, `is_status_locked`, Group C/D Spec C.1/C.2
+  - Branch ของ CFO (Track B): `feat/flow-cfo`
 - **สถานะการทดสอบ (Local Compile & Verification บน Branch `Sec1`):**
-  - `node scripts/verify-local.js`: **ผ่านครบถ้วน 100% (`0 Errors`)** (13 Syntax checks + Sections 1–11 Security/Auth/Session/Finance/CIAM checks)
-  - Inline Script Check (`app/public/index.html` ผ่าน `vm.Script`): **ผ่าน Cleanly**
+  - `node scripts/verify-local.js`: **ผ่านครบถ้วน 100% (`0 Errors`)** (14 Syntax checks + Sections 1–12 Security/Auth/Session/OTP/Notification/Finance/CIAM checks)
+  - Inline Script Check (`app/public/index.html` ผ่าน `vm.Script`): **ผ่าน Cleanly (`Verified inline scripts: 1`)**
 
 ---
 

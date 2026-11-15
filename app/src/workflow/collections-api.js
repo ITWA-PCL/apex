@@ -131,6 +131,8 @@ async function prepareUserMutation(req, res, targetId, existingDoc, rawBody = {}
 
   const payload = sanitizeIncomingUserPayload(rawBody, existingDoc);
   delete payload.force_override;
+  const wantSendInvite = Boolean(rawBody.send_invite);
+  delete payload.send_invite;
 
   if (rawBody.username !== undefined) {
     payload.username = String(rawBody.username || '').trim();
@@ -139,20 +141,53 @@ async function prepareUserMutation(req, res, targetId, existingDoc, rawBody = {}
     }
   }
 
-  if (hasPlainPassword) {
+  const effectiveRole = rawBody.role !== undefined ? rawBody.role : existingDoc?.role;
+  const effectiveKind = rawBody.kind !== undefined ? rawBody.kind : existingDoc?.kind;
+  const isExt =
+    effectiveKind === 'external' ||
+    ['contractor', 'customer'].includes(String(effectiveRole || '').toLowerCase());
+  payload.kind = isExt ? 'external' : 'internal';
+
+  if (isExt) {
+    payload.use_ad_auth = false;
+  } else if (rawBody.use_ad_auth !== undefined || !existingDoc) {
+    payload.use_ad_auth =
+      rawBody.use_ad_auth !== undefined
+        ? Boolean(rawBody.use_ad_auth)
+        : (existingDoc?.use_ad_auth ?? docId !== 'U01');
+  } else if (existingDoc && existingDoc.use_ad_auth !== undefined) {
+    payload.use_ad_auth = Boolean(existingDoc.use_ad_auth);
+  }
+
+  if (payload.use_ad_auth === true) {
+    payload.password_hash = null;
+    payload.must_change_password = false;
+    payload.registration_status = 'active_ad';
+  } else if (hasPlainPassword) {
     payload.password_changed_at = new Date().toISOString();
+    payload.registration_status = 'registered';
     if (typeof rawBody.must_change_password === 'boolean') {
       payload.must_change_password = rawBody.must_change_password;
     }
-  } else if (typeof rawBody.must_change_password === 'boolean') {
-    payload.must_change_password = rawBody.must_change_password;
+  } else {
+    if (typeof rawBody.must_change_password === 'boolean') {
+      payload.must_change_password = rawBody.must_change_password;
+    }
+    if (!existingDoc && !existingDoc?.password_hash) {
+      payload.registration_status = 'pending_invite';
+    }
   }
 
-  if (rawBody.use_ad_auth !== undefined) {
-    payload.use_ad_auth = Boolean(rawBody.use_ad_auth);
-    if (payload.use_ad_auth === true && rawBody.must_change_password === undefined) {
-      payload.must_change_password = false;
-    }
+  if (rawBody.telegram_chat_id !== undefined || !existingDoc) {
+    payload.telegram_chat_id = String(
+      rawBody.telegram_chat_id ?? existingDoc?.telegram_chat_id ?? ''
+    ).trim();
+  }
+  if (rawBody.otp_enabled !== undefined || !existingDoc) {
+    payload.otp_enabled =
+      rawBody.otp_enabled !== undefined
+        ? Boolean(rawBody.otp_enabled)
+        : Boolean(existingDoc?.otp_enabled);
   }
 
   const nowIso = new Date().toISOString();
@@ -181,10 +216,18 @@ async function prepareUserMutation(req, res, targetId, existingDoc, rawBody = {}
     }
   }
 
-  return { payload, passwordUpdated: hasPlainPassword };
+  return { payload, passwordUpdated: hasPlainPassword, wantSendInvite };
 }
 
-async function finalizeMutationSideEffects(req, collection, id, prevDoc, saved, passwordUpdated) {
+async function finalizeMutationSideEffects(
+  req,
+  collection,
+  id,
+  prevDoc,
+  saved,
+  passwordUpdated,
+  wantSendInvite = false
+) {
   if (collection === 'users' && saved) {
     const wasActive = prevDoc ? prevDoc.active !== false && prevDoc.is_active !== false : null;
     const isNowActive = saved.active !== false && saved.is_active !== false;
@@ -215,12 +258,40 @@ async function finalizeMutationSideEffects(req, collection, id, prevDoc, saved, 
         username: saved.username || null,
         email: saved.email || null,
         role: saved.role || null,
+        kind: saved.kind || null,
         active: isNowActive,
         use_ad_auth: saved.use_ad_auth !== false,
+        otp_enabled: Boolean(saved.otp_enabled),
         must_change_password: Boolean(saved.must_change_password),
         method: req.method
       }
     });
+
+    const notifier = require('../security/notifier');
+    let inviteResult = null;
+    if (
+      saved.use_ad_auth === false &&
+      isNowActive &&
+      (wantSendInvite || (!prevDoc && !saved.password_hash))
+    ) {
+      inviteResult = await notifier.createRegistrationInvite(saved, req.apexUser, req.ip);
+    } else if (!prevDoc) {
+      const s = await db.getSystemSettings();
+      if (s.telegram_enabled === 'true' && s.telegram_notify_user_provision === 'true') {
+        await notifier
+          .sendTelegramNotification({
+            text: `<b>[APEX Provisioning]</b> สร้างบัญชีผู้ใช้ใหม่\n• ชื่อ: ${saved.name || saved.id} (<code>${saved.username || saved.id}</code>)\n• ประเภท: ${saved.kind === 'external' ? 'External Local' : saved.use_ad_auth !== false ? 'Internal AD SSO' : 'Internal Local'}\n• บทบาท: ${saved.role || ''}`,
+            chatId: saved.telegram_chat_id || '',
+            eventType: 'user_created',
+            actor: req.apexUser,
+            ipAddress: req.ip,
+            targetResource: `users/${id}`
+          })
+          .catch(() => {});
+      }
+    }
+
+    return inviteResult;
   } else if (collection === 'roles' && saved) {
     await db.insertAuditLog({
       eventCode: 'ROLE-UPDATE',
@@ -235,6 +306,7 @@ async function finalizeMutationSideEffects(req, collection, id, prevDoc, saved, 
       }
     });
   }
+  return null;
 }
 
 // Connected SSE clients for real-time onSnapshot updates across Desktop & Mobile PWA
@@ -483,11 +555,13 @@ async function authorizeAndSanitizeMutation(req, res, collection, targetId = nul
 
   let payload = { ...(req.body || {}) };
   let passwordUpdated = false;
+  let wantSendInvite = false;
   if (collection === 'users') {
     const prepared = await prepareUserMutation(req, res, targetId, existingDoc, payload);
     if (!prepared) return null;
     payload = prepared.payload;
     passwordUpdated = prepared.passwordUpdated;
+    wantSendInvite = Boolean(prepared.wantSendInvite);
   } else {
     delete payload.password;
     delete payload.password_hash;
@@ -527,7 +601,7 @@ async function authorizeAndSanitizeMutation(req, res, collection, targetId = nul
     return null;
   }
 
-  return { existingDoc, payload, passwordUpdated };
+  return { existingDoc, payload, passwordUpdated, wantSendInvite };
 }
 
 router.post('/api/v1/db/:collection', async (req, res) => {
@@ -543,12 +617,22 @@ router.post('/api/v1/db/:collection', async (req, res) => {
     if (!auth) return;
 
     const saved = await db.setDoc(col, id, auth.payload, req.apexUser.id);
-    await finalizeMutationSideEffects(req, col, id, auth.existingDoc, saved, auth.passwordUpdated);
+    const invite = await finalizeMutationSideEffects(
+      req,
+      col,
+      id,
+      auth.existingDoc,
+      saved,
+      auth.passwordUpdated,
+      auth.wantSendInvite
+    );
+    const latest = col === 'users' && invite ? (await db.getDoc(col, id)) || saved : saved;
     broadcastCollectionChange(col, 'add', id);
     res.status(201).json({
       status: 'ok',
       id,
-      data: sanitizeDocForResponse(col, saved, req.apexUser)
+      data: sanitizeDocForResponse(col, latest, req.apexUser),
+      ...(invite ? { invite } : {})
     });
   } catch (err) {
     res.status(400).json({ error: 'write_failed', message: err.message });
@@ -562,19 +646,22 @@ router.put('/api/v1/db/:collection/:id', async (req, res) => {
     if (!auth) return;
 
     const saved = await db.setDoc(collection, id, auth.payload, req.apexUser.id);
-    await finalizeMutationSideEffects(
+    const invite = await finalizeMutationSideEffects(
       req,
       collection,
       id,
       auth.existingDoc,
       saved,
-      auth.passwordUpdated
+      auth.passwordUpdated,
+      auth.wantSendInvite
     );
+    const latest = collection === 'users' && invite ? (await db.getDoc(collection, id)) || saved : saved;
     broadcastCollectionChange(collection, 'set', id);
     res.json({
       status: 'ok',
       id,
-      data: sanitizeDocForResponse(collection, saved, req.apexUser)
+      data: sanitizeDocForResponse(collection, latest, req.apexUser),
+      ...(invite ? { invite } : {})
     });
   } catch (err) {
     res.status(400).json({ error: 'write_failed', message: err.message });
@@ -588,19 +675,22 @@ router.patch('/api/v1/db/:collection/:id', async (req, res) => {
     if (!auth) return;
 
     const saved = await db.updateDoc(collection, id, auth.payload, req.apexUser.id);
-    await finalizeMutationSideEffects(
+    const invite = await finalizeMutationSideEffects(
       req,
       collection,
       id,
       auth.existingDoc,
       saved,
-      auth.passwordUpdated
+      auth.passwordUpdated,
+      auth.wantSendInvite
     );
+    const latest = collection === 'users' && invite ? (await db.getDoc(collection, id)) || saved : saved;
     broadcastCollectionChange(collection, 'update', id);
     res.json({
       status: 'ok',
       id,
-      data: sanitizeDocForResponse(collection, saved, req.apexUser)
+      data: sanitizeDocForResponse(collection, latest, req.apexUser),
+      ...(invite ? { invite } : {})
     });
   } catch (err) {
     res.status(400).json({ error: 'update_failed', message: err.message });
