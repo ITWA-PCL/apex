@@ -78,6 +78,12 @@
       const res = await fetch(`/api/v1/db/${encodeURIComponent(col)}`, {
         headers: getHeaders()
       });
+      if (res.status === 401) {
+        if (currentUser && typeof window.__APEX_ON_401__ === 'function') {
+          window.__APEX_ON_401__();
+        }
+        return;
+      }
       if (!res.ok) return;
       const payload = await res.json();
       if (Array.isArray(payload.docs)) {
@@ -92,6 +98,31 @@
     } catch (err) {
       console.warn('[APEX Bridge] Refresh collection failed:', col, err);
     }
+  }
+
+  function sanitizeOptimisticRecord(col, record) {
+    if (col !== 'users' || !record || typeof record !== 'object') return record;
+    const clean = { ...record };
+    delete clean.password;
+    delete clean.password_hash;
+    delete clean.admin_password_hash;
+    return clean;
+  }
+
+  async function handleFailedResponse(res, col, fallbackMsg) {
+    const out = await res.json().catch(() => null);
+    if (res.status === 401) {
+      if (currentUser && typeof window.__APEX_ON_401__ === 'function') {
+        window.__APEX_ON_401__();
+      }
+    } else if (col) {
+      await refreshCollectionFromServer(col);
+    }
+    const err = new Error(out?.message || fallbackMsg);
+    err.status = res.status;
+    err.code = out?.error || `http_${res.status}`;
+    if (out?.message) err.serverMessage = out.message;
+    throw err;
   }
 
   function connectRealTimeEvents() {
@@ -176,27 +207,41 @@
       set: async body => {
         const map = ensureCollection(col);
         const record = { ...body, id };
-        map[id] = record;
+        map[id] = sanitizeOptimisticRecord(col, record);
         emitCollection(col);
         const res = await fetch(`/api/v1/db/${encodeURIComponent(col)}/${encodeURIComponent(id)}`, {
           method: 'PUT',
           headers: getHeaders(),
           body: JSON.stringify(record)
         });
-        if (!res.ok) throw new Error(`Set failed on ${col}/${id}`);
+        if (!res.ok) {
+          await handleFailedResponse(res, col, `Set failed on ${col}/${id}`);
+        }
+        const saved = await res.json().catch(() => null);
+        if (saved && saved.data) {
+          map[saved.id || id] = { ...saved.data, id: saved.id || id };
+          emitCollection(col);
+        }
       },
       update: async patch => {
         const map = ensureCollection(col);
         const current = map[id] || { id };
         const updated = { ...current, ...patch, id };
-        map[id] = updated;
+        map[id] = sanitizeOptimisticRecord(col, updated);
         emitCollection(col);
         const res = await fetch(`/api/v1/db/${encodeURIComponent(col)}/${encodeURIComponent(id)}`, {
           method: 'PATCH',
           headers: getHeaders(),
           body: JSON.stringify(patch)
         });
-        if (!res.ok) throw new Error(`Update failed on ${col}/${id}`);
+        if (!res.ok) {
+          await handleFailedResponse(res, col, `Update failed on ${col}/${id}`);
+        }
+        const saved = await res.json().catch(() => null);
+        if (saved && saved.data) {
+          map[saved.id || id] = { ...saved.data, id: saved.id || id };
+          emitCollection(col);
+        }
       },
       delete: async () => {
         const map = ensureCollection(col);
@@ -206,7 +251,9 @@
           method: 'DELETE',
           headers: getHeaders()
         });
-        if (!res.ok) throw new Error(`Delete failed on ${col}/${id}`);
+        if (!res.ok) {
+          await handleFailedResponse(res, col, `Delete failed on ${col}/${id}`);
+        }
       }
     };
   }
@@ -219,23 +266,28 @@
         const id = body.id || body.code || `d_${(++seqCounter).toString(36)}`;
         const map = ensureCollection(col);
         const record = { ...body, id };
-        map[id] = record;
+        map[id] = sanitizeOptimisticRecord(col, record);
         emitCollection(col);
         const res = await fetch(`/api/v1/db/${encodeURIComponent(col)}`, {
           method: 'POST',
           headers: getHeaders(),
           body: JSON.stringify(record)
         });
-        if (res.ok) {
-          const saved = await res.json();
-          if (saved.id && saved.id !== id) {
-            delete map[id];
-            map[saved.id] = { ...record, id: saved.id };
-            emitCollection(col);
-            return createDocRef(`${col}/${saved.id}`);
-          }
+        if (!res.ok) {
+          await handleFailedResponse(res, col, `Add failed on ${col}`);
         }
-        return createDocRef(`${col}/${id}`);
+        const saved = await res.json().catch(() => null);
+        const finalId = saved?.id || id;
+        if (saved && saved.data) {
+          if (finalId !== id) delete map[id];
+          map[finalId] = { ...saved.data, id: finalId };
+          emitCollection(col);
+        } else if (finalId !== id) {
+          delete map[id];
+          map[finalId] = sanitizeOptimisticRecord(col, { ...record, id: finalId });
+          emitCollection(col);
+        }
+        return createDocRef(`${col}/${finalId}`);
       },
       onSnapshot: callback => {
         if (!subscribers[col]) subscribers[col] = [];

@@ -6,8 +6,13 @@
 (function initApexSecurityAndCopilotUI() {
   let ciamSettings = null;
   let sessionInfo = null;
+  let ssoConfig = null;
   let auditLogs = [];
   let copilotOpen = false;
+  let handling401 = false;
+
+  const esc = v =>
+    String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   const ROLE_TH = {
     admin: 'ผู้ดูแลระบบ',
@@ -244,20 +249,129 @@
         gap: 14px;
         margin-top: 12px;
       }
+      .apex-breakglass-banner {
+        background: rgba(245, 158, 11, 0.14);
+        border: 1px solid rgba(245, 158, 11, 0.45);
+        color: #fcd34d;
+        padding: 10px 12px;
+        border-radius: 8px;
+        font-size: 12px;
+        margin-bottom: 14px;
+        line-height: 1.5;
+      }
+      .apex-sso-desktop {
+        display: block;
+      }
+      .apex-sso-mobile {
+        display: none;
+      }
+      @media (max-width: 767px) {
+        .apex-sso-desktop {
+          display: none;
+        }
+        .apex-sso-mobile {
+          display: block;
+          margin-top: 12px;
+        }
+      }
+      .apex-pwd-wrap {
+        position: relative;
+        display: flex;
+        align-items: center;
+      }
+      .apex-pwd-wrap input {
+        padding-right: 40px !important;
+      }
+      .apex-pwd-toggle {
+        position: absolute;
+        right: 8px;
+        background: transparent;
+        border: none;
+        color: #8b9bb0;
+        cursor: pointer;
+        font-size: 15px;
+        padding: 4px 6px;
+        line-height: 1;
+      }
+      .apex-pwd-toggle:hover {
+        color: #f0f6fc;
+      }
+      .apex-modal-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .apex-modal-close {
+        background: transparent;
+        border: 1px solid #28364a;
+        color: #8b9bb0;
+        border-radius: 8px;
+        cursor: pointer;
+        padding: 4px 10px;
+        font-size: 13px;
+      }
+      .apex-modal-close:hover {
+        color: #f0f6fc;
+        border-color: #4f6482;
+      }
     `;
     document.head.appendChild(style);
   }
 
+  function bindPasswordToggles(rootEl) {
+    if (!rootEl) return;
+    rootEl.querySelectorAll('.apex-pwd-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const targetId = btn.getAttribute('data-pwd-target');
+        const input = targetId ? rootEl.querySelector(`#${targetId}`) : btn.previousElementSibling;
+        if (!input) return;
+        const nextType = input.type === 'password' ? 'text' : 'password';
+        input.type = nextType;
+        btn.setAttribute('aria-label', nextType === 'text' ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน');
+        btn.textContent = nextType === 'text' ? '🙈' : '👁️';
+      });
+    });
+  }
+
   async function fetchSessionInfo() {
     try {
-      const res = await fetch('/api/auth/session');
-      if (res.ok) {
-        sessionInfo = await res.json();
+      const [sessRes, cfgRes] = await Promise.all([
+        fetch('/api/auth/session'),
+        fetch('/api/auth/sso/config').catch(() => null)
+      ]);
+      if (cfgRes && cfgRes.ok) {
+        ssoConfig = await cfgRes.json();
+      }
+      if (sessRes.ok) {
+        sessionInfo = await sessRes.json();
         return sessionInfo;
       }
     } catch (_) {}
     return null;
   }
+
+  async function handleUnauthorizedRedirect() {
+    if (handling401) return;
+    handling401 = true;
+    const base = ssoConfig?.ciam_base_url || ciamSettings?.ciam_issuer_url || 'https://ciam.windowasia.com';
+    const portalFallback = ciamSettings?.ciam_portal_url || `${String(base).replace(/\/+$/, '')}/portal`;
+    const ssoActive = Boolean(ssoConfig?.sso_enabled ?? sessionInfo?.ciam_enabled);
+    const bgActive = Boolean(ssoConfig?.break_glass_active ?? sessionInfo?.break_glass_enabled);
+
+    if (ssoActive && !bgActive) {
+      window.location.href = portalFallback;
+      return;
+    }
+
+    await fetchSessionInfo();
+    if (sessionInfo) sessionInfo.authenticated = false;
+    renderLoginOverlay();
+    setTimeout(() => {
+      handling401 = false;
+    }, 1500);
+  }
+  window.__APEX_ON_401__ = handleUnauthorizedRedirect;
 
   async function fetchCiamSettings() {
     try {
@@ -274,7 +388,7 @@
   }
 
   // ==========================================================================
-  // 1. FULL-SCREEN ENTERPRISE LOGIN GATE
+  // 1. FULL-SCREEN ENTERPRISE LOGIN GATE (CIAM Spec §5.2 Responsive + State-Driven)
   // ==========================================================================
   function renderLoginOverlay() {
     let overlay = document.getElementById('apex-login-overlay');
@@ -293,19 +407,40 @@
 
     overlay.hidden = false;
     const loginRenderTs = Date.now();
+    const ssoEnabled = Boolean(ssoConfig?.sso_enabled ?? sessionInfo?.ciam_enabled);
+    const breakGlassActive = Boolean(ssoConfig?.break_glass_active ?? sessionInfo?.break_glass_enabled);
+    const ssoBtnLabel = esc(
+      ssoConfig?.login_button_label || 'เข้าสู่ระบบด้วย Window Asia Central IAM (SSO)'
+    );
+    const showSso = ssoEnabled && !breakGlassActive;
+
     overlay.innerHTML = `
       <div class="apex-login-card">
         <div class="apex-login-badge">🛡️ Window Asia Public Co., Ltd. · ISO/IEC 27001:2022</div>
         <h1>เข้าสู่ระบบ APEX</h1>
         <span class="sub">ระบบควบคุมงานติดตั้งประตู-หน้าต่าง (S1–S8) · <code>apex.windowasia.com</code></span>
 
+        ${
+          breakGlassActive
+            ? `<div class="apex-breakglass-banner">
+                 ⚠️ <strong>โหมดฉุกเฉิน (Break-Glass Mode) กำลังทำงาน</strong><br>
+                 การล็อกอินผ่าน Central IAM SSO ถูกระงับชั่วคราว กรุณาเข้าสู่ระบบด้วย Local Account หรือรหัสพนักงาน (AD Gateway)
+               </div>`
+            : ''
+        }
+
         <div id="apexLoginError" class="apex-login-error" hidden></div>
 
-        <button type="button" class="apex-sso-btn" id="btnLoginCiamSso">
-          🔐 เข้าสู่ระบบด้วย Window Asia Central IAM (SSO)
-        </button>
-
-        <div class="apex-login-divider">หรือเข้าสู่ระบบสำหรับผู้ดูแลระบบ / บัญชี Non-AD</div>
+        ${
+          showSso
+            ? `<div class="apex-sso-desktop">
+                 <button type="button" class="apex-sso-btn" id="btnLoginCiamSso">
+                   🔐 ${ssoBtnLabel}
+                 </button>
+                 <div class="apex-login-divider">หรือเข้าสู่ระบบด้วยบัญชีภายในระบบ / Non-AD</div>
+               </div>`
+            : ''
+        }
 
         <form id="apexLocalLoginForm">
           <!-- Layer 2: In-App Decoy Honeypot Trap (Spec v2.12.0 หมวด F.3) -->
@@ -315,17 +450,31 @@
           </div>
 
           <label class="apex-login-field">
-            <span>อีเมล หรือ รหัสผู้ใช้งาน (User ID)</span>
-            <input type="text" name="identifier" id="apexLoginIdentifier" placeholder="กรอกอีเมลหรือรหัสผู้ใช้งาน" required autocomplete="username">
+            <span>Username, อีเมล หรือ รหัสผู้ใช้งาน</span>
+            <input type="text" name="identifier" id="apexLoginIdentifier" placeholder="เช่น admin, somchai.p หรืออีเมลองค์กร" required autocomplete="username">
           </label>
           <label class="apex-login-field">
             <span>รหัสผ่าน (Password)</span>
-            <input type="password" name="password" id="apexLoginPassword" value="" placeholder="กรอกรหัสผ่านของคุณ" required autocomplete="current-password">
+            <div class="apex-pwd-wrap">
+              <input type="password" name="password" id="apexLoginPassword" value="" placeholder="กรอกรหัสผ่านของคุณ" required autocomplete="current-password">
+              <button type="button" class="apex-pwd-toggle" data-pwd-target="apexLoginPassword" aria-label="แสดงรหัสผ่าน">👁️</button>
+            </div>
           </label>
           <button type="submit" class="apex-login-submit" id="btnApexLoginSubmit">
             เข้าสู่ระบบ (Sign In) →
           </button>
         </form>
+
+        ${
+          showSso
+            ? `<div class="apex-sso-mobile">
+                 <div class="apex-login-divider">หรือเข้าสู่ระบบผ่านระบบกลางองค์กร</div>
+                 <button type="button" class="apex-sso-btn" id="btnLoginCiamSsoMobile">
+                   🔐 ${ssoBtnLabel}
+                 </button>
+               </div>`
+            : ''
+        }
 
         <div class="apex-login-foot">
           <span>🔒 PKCE (S256) · Inactive Guard (SSO-04)</span>
@@ -334,8 +483,12 @@
       </div>
     `;
 
-    overlay.querySelector('#btnLoginCiamSso')?.addEventListener('click', () => {
-      window.location.href = '/api/auth/sso/login';
+    bindPasswordToggles(overlay);
+
+    overlay.querySelectorAll('.apex-sso-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        window.location.href = '/api/auth/sso/login';
+      });
     });
 
     overlay.querySelector('#apexLocalLoginForm')?.addEventListener('submit', async e => {
@@ -381,9 +534,14 @@
         // Check if 90-day password rotation applies (Spec v2.12.0 หมวด G - Local Account Only)
         if (out.must_change_password) {
           overlay.hidden = true;
-          renderForcedPasswordChangeModal(out.user, out.password_days_left, () => {
-            window.location.reload();
-          });
+          renderForcedPasswordChangeModal(
+            out.user,
+            out.password_days_left,
+            () => {
+              window.location.reload();
+            },
+            { forced: true }
+          );
           return;
         }
 
@@ -405,7 +563,8 @@
     });
   }
 
-  function renderForcedPasswordChangeModal(user, daysLeft, onDone) {
+  function renderForcedPasswordChangeModal(user, daysLeft, onDone, options = {}) {
+    const isForced = options.forced !== false;
     let modal = document.getElementById('apex-pwd-change-modal');
     if (modal) modal.remove();
 
@@ -413,15 +572,21 @@
     modal.id = 'apex-pwd-change-modal';
     modal.className = 'apex-pwd-modal-overlay noprint';
 
+    const titleText = isForced ? 'จำเป็นต้องเปลี่ยนรหัสผ่านใหม่' : 'เปลี่ยนรหัสผ่านบัญชีผู้ใช้';
+    const descText = isForced
+      ? `บัญชีท้องถิ่น (${esc(user?.name || user?.username || user?.id || 'Local User')}) ถึงกำหนดเปลี่ยนรหัสผ่านตามรอบความปลอดภัย 90 วัน (ISO 27001) กรุณาตั้งรหัสผ่านใหม่เพื่อเข้าใช้งาน`
+      : `บัญชี ${esc(user?.name || user?.username || user?.id || '')} — รหัสผ่านใหม่จะมีผลบังคับใช้นาน 90 วันตามมาตรฐานความปลอดภัย`;
+
     modal.innerHTML = `
       <div class="apex-pwd-modal-card">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <span style="font-size:22px">🔒</span>
-          <h2 style="font-size:16px;font-weight:700;margin:0;color:#f0f6fc">จำเป็นต้องเปลี่ยนรหัสผ่านใหม่</h2>
+        <div class="apex-modal-head" style="margin-bottom:8px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:22px">${isForced ? '🔒' : '🔑'}</span>
+            <h2 style="font-size:16px;font-weight:700;margin:0;color:#f0f6fc">${titleText}</h2>
+          </div>
+          ${!isForced ? '<button type="button" class="apex-modal-close" id="btnClosePwdModal" aria-label="ปิด">✕ ยกเลิก</button>' : ''}
         </div>
-        <p style="font-size:12px;color:#8b9bb0;margin:0 0 12px;line-height:1.5">
-          บัญชีท้องถิ่น (${user?.name || user?.id || 'Local User'}) ถึงกำหนดเปลี่ยนรหัสผ่านตามรอบความปลอดภัย 90 วัน (ISO 27001) กรุณาตั้งรหัสผ่านใหม่เพื่อเข้าใช้งาน
-        </p>
+        <p style="font-size:12px;color:#8b9bb0;margin:0 0 12px;line-height:1.5">${descText}</p>
 
         <div id="apexPwdModalError" class="apex-login-error" hidden></div>
 
@@ -432,21 +597,30 @@
           <div id="chkLower" class="apex-pwd-check-item"><span>•</span> ตัวอักษรพิมพ์เล็ก (a-z) อย่างน้อย 1 ตัว</div>
           <div id="chkDigit" class="apex-pwd-check-item"><span>•</span> ตัวเลข (0-9) อย่างน้อย 1 ตัว</div>
           <div id="chkSpecial" class="apex-pwd-check-item"><span>•</span> อักขระพิเศษ (!@#$%^&*...) อย่างน้อย 1 ตัว</div>
-          <div id="chkNoUser" class="apex-pwd-check-item"><span>•</span> ไม่มีชื่อผู้ใช้ในรหัสผ่าน</div>
+          <div id="chkNoUser" class="apex-pwd-check-item"><span>•</span> ไม่มีชื่อผู้ใช้ (Username) ในรหัสผ่าน</div>
         </div>
 
         <form id="apexForcedPwdForm">
           <label class="apex-login-field">
             <span>รหัสผ่านเดิม (Current Password) *</span>
-            <input type="password" id="apexOldPassword" required placeholder="กรอกรหัสผ่านปัจจุบัน">
+            <div class="apex-pwd-wrap">
+              <input type="password" id="apexOldPassword" required placeholder="กรอกรหัสผ่านปัจจุบัน" autocomplete="current-password">
+              <button type="button" class="apex-pwd-toggle" data-pwd-target="apexOldPassword" aria-label="แสดงรหัสผ่าน">👁️</button>
+            </div>
           </label>
           <label class="apex-login-field">
             <span>รหัสผ่านใหม่ (New Password) *</span>
-            <input type="password" id="apexNewPassword" maxlength="16" required placeholder="8-16 ตัวอักษร">
+            <div class="apex-pwd-wrap">
+              <input type="password" id="apexNewPassword" maxlength="16" required placeholder="8-16 ตัวอักษร" autocomplete="new-password">
+              <button type="button" class="apex-pwd-toggle" data-pwd-target="apexNewPassword" aria-label="แสดงรหัสผ่าน">👁️</button>
+            </div>
           </label>
           <label class="apex-login-field">
             <span>ยืนยันรหัสผ่านใหม่ (Confirm Password) *</span>
-            <input type="password" id="apexConfirmPassword" maxlength="16" required placeholder="กรอกรหัสผ่านใหม่อีกครั้ง">
+            <div class="apex-pwd-wrap">
+              <input type="password" id="apexConfirmPassword" maxlength="16" required placeholder="กรอกรหัสผ่านใหม่อีกครั้ง" autocomplete="new-password">
+              <button type="button" class="apex-pwd-toggle" data-pwd-target="apexConfirmPassword" aria-label="แสดงรหัสผ่าน">👁️</button>
+            </div>
           </label>
           <button type="submit" class="apex-login-submit" id="btnSubmitNewPassword" disabled style="opacity:0.55">
             บันทึกรหัสผ่านใหม่ (มีอายุ 90 วัน) →
@@ -456,13 +630,19 @@
     `;
 
     document.body.appendChild(modal);
+    bindPasswordToggles(modal);
+
+    modal.querySelector('#btnClosePwdModal')?.addEventListener('click', () => {
+      modal.remove();
+    });
 
     const oldPwdInput = modal.querySelector('#apexOldPassword');
     const newPwdInput = modal.querySelector('#apexNewPassword');
     const confirmPwdInput = modal.querySelector('#apexConfirmPassword');
     const submitBtn = modal.querySelector('#btnSubmitNewPassword');
     const errBox = modal.querySelector('#apexPwdModalError');
-    const username = String(user?.name || user?.id || '').trim();
+    const emailPrefix = user?.email && String(user.email).includes('@') ? String(user.email).split('@')[0] : '';
+    const username = String(user?.username || user?.uid || emailPrefix || user?.id || '').trim();
 
     function updateChecklist() {
       const p = newPwdInput.value || '';
@@ -517,7 +697,11 @@
         }
 
         modal.remove();
-        alert('เปลี่ยนรหัสผ่านเรียบร้อยแล้ว (มีผลบังคับใช้ 90 วันตามมาตรฐาน ISO 27001)');
+        if (typeof window.toast === 'function') {
+          window.toast('เปลี่ยนรหัสผ่านเรียบร้อยแล้ว (มีผลบังคับใช้ 90 วันตามมาตรฐาน ISO 27001)');
+        } else if (isForced) {
+          alert('เปลี่ยนรหัสผ่านเรียบร้อยแล้ว (มีผลบังคับใช้ 90 วันตามมาตรฐาน ISO 27001)');
+        }
         if (typeof onDone === 'function') onDone();
       } catch (err) {
         errBox.textContent = 'เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์';
@@ -611,19 +795,34 @@
     if (!topbar) return;
     const u = sessionInfo?.user || window.__APEX_USER__ || { name: 'ผู้ดูแลระบบ', role: 'admin', email: 'u01@windowasia.co.th' };
     const dbMode = sessionInfo?.database_mode === 'postgresql' ? 'PostgreSQL 16 (ออนไลน์)' : 'Local Fallback';
+    const isLocalAuth = u.use_ad_auth === false || u.id === 'U01';
 
     topbar.innerHTML = `
       <div class="apex-topbar-left">
-        <span class="pill acc">👤 ${u.name || 'ผู้ดูแลระบบ'}</span>
-        <span class="pill">${ROLE_TH[u.role] || u.role}</span>
-        <span class="sub mono">${u.email || ''}</span>
+        <span class="pill acc">👤 ${esc(u.name || 'ผู้ดูแลระบบ')}</span>
+        ${u.username ? `<span class="sub mono">@${esc(u.username)}</span>` : ''}
+        <span class="pill">${esc(ROLE_TH[u.role] || u.role)}</span>
+        <span class="pill">${isLocalAuth ? '🔑 Local' : '🔐 AD SSO'}</span>
+        ${u.email ? `<span class="sub mono">${esc(u.email)}</span>` : ''}
         <span class="pill good" style="font-size:11.5px">🗄️ ${dbMode}</span>
       </div>
       <div class="apex-topbar-right">
+        ${isLocalAuth ? '<button type="button" class="btn sm" id="btnTopChangePassword">🔑 เปลี่ยนรหัสผ่าน</button>' : ''}
         <button type="button" class="btn sm primary" id="btnTopOpenSettings">⚙️ ตั้งค่าระบบ & SSO</button>
         <button type="button" class="btn sm" id="btnTopLogout">🚪 ออกจากระบบ (Logout)</button>
       </div>
     `;
+
+    topbar.querySelector('#btnTopChangePassword')?.addEventListener('click', () => {
+      renderForcedPasswordChangeModal(
+        u,
+        90,
+        () => {
+          window.location.reload();
+        },
+        { forced: false }
+      );
+    });
 
     topbar.querySelector('#btnTopOpenSettings')?.addEventListener('click', () => {
       openSettingsView();
@@ -753,6 +952,20 @@
               </label>
               <label style="grid-column:1/-1">Break-Glass Emergency Auth URL
                 <input type="url" name="break_glass_url" value="${s.break_glass_url || 'http://172.18.0.1:3100'}">
+              </label>
+              <label>สิทธิ์เริ่มต้นเมื่อสร้างบัญชีอัตโนมัติ (JIT Provision Role)
+                <select name="ciam_auto_provision_group">
+                  ${Object.entries(ROLE_TH)
+                    .filter(([k]) => k !== 'admin' || s.ciam_auto_provision_group === 'admin')
+                    .map(
+                      ([k, th]) =>
+                        `<option value="${k}" ${(s.ciam_auto_provision_group || 'viewer') === k ? 'selected' : ''}>${k} — ${th}</option>`
+                    )
+                    .join('')}
+                </select>
+              </label>
+              <label>อายุ Session สูงสุด (นาที / Session TTL)
+                <input type="number" name="ciam_session_ttl_minutes" min="15" max="10080" value="${Number(s.ciam_session_ttl_minutes || 480)}">
               </label>
               <label class="row" style="gap:8px;grid-column:1/-1;margin-top:4px">
                 <input type="checkbox" name="ciam_enabled" ${s.ciam_enabled ? 'checked' : ''} style="width:18px;height:18px">
@@ -1007,5 +1220,17 @@
     renderLoginOverlay();
     injectSidebarAndTopBar();
     initCopilotWidget();
+    if (
+      sessionInfo?.authenticated &&
+      sessionInfo?.user?.must_change_password &&
+      sessionInfo?.user?.use_ad_auth === false
+    ) {
+      renderForcedPasswordChangeModal(
+        sessionInfo.user,
+        0,
+        () => window.location.reload(),
+        { forced: true }
+      );
+    }
   });
 })();

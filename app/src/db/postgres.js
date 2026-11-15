@@ -93,6 +93,8 @@ const DEFAULT_SYSTEM_SETTINGS = {
   ciam_portal_url: 'https://ciam.windowasia.com/portal',
   ciam_management_api_key: '',
   ciam_allowed_ips: '157.173.219.153,172.18.0.1,127.0.0.1,::1',
+  ciam_auto_provision_group: 'viewer',
+  ciam_session_ttl_minutes: '480',
   break_glass_enabled: 'false',
   break_glass_url: 'http://172.18.0.1:3100',
   ai_copilot_enabled: 'true',
@@ -115,7 +117,8 @@ const fallbackFile = path.join(__dirname, '..', '..', 'data', 'local-store.json'
 let memoryStore = {
   collections: {},
   system_settings: { ...DEFAULT_SYSTEM_SETTINGS },
-  transaction_logs: []
+  transaction_logs: [],
+  active_sessions: {}
 };
 
 function loadFallbackStore() {
@@ -125,6 +128,7 @@ function loadFallbackStore() {
       memoryStore.collections = raw.collections || {};
       memoryStore.system_settings = { ...DEFAULT_SYSTEM_SETTINGS, ...(raw.system_settings || {}) };
       memoryStore.transaction_logs = raw.transaction_logs || [];
+      memoryStore.active_sessions = raw.active_sessions || {};
     }
     const reconciled = reconcileAdminPasswordSettings(memoryStore.system_settings);
     memoryStore.system_settings.admin_password_hash = reconciled.admin_password_hash;
@@ -186,6 +190,19 @@ async function initDatabase() {
           );
           CREATE INDEX IF NOT EXISTS idx_tx_logs_created_at ON transaction_logs(created_at DESC);
           CREATE INDEX IF NOT EXISTS idx_tx_logs_event_code ON transaction_logs(event_code);
+
+          CREATE TABLE IF NOT EXISTS active_sessions (
+            session_id VARCHAR(128) PRIMARY KEY,
+            user_id VARCHAR(128) NOT NULL,
+            uid VARCHAR(128),
+            username VARCHAR(128),
+            email VARCHAR(255),
+            auth_method VARCHAR(64) DEFAULT 'local',
+            must_change_password BOOLEAN DEFAULT FALSE,
+            authenticated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            expires_at TIMESTAMPTZ NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_active_sessions_user_id ON active_sessions(user_id);
         `);
 
         for (const [k, v] of Object.entries(DEFAULT_SYSTEM_SETTINGS)) {
@@ -229,13 +246,16 @@ async function initDatabase() {
             JSON.stringify({
               id: 'U01',
               uid: 'U01',
+              username: 'admin',
               name: 'คุณปฏินันท์',
               title: 'ผู้ดูแลระบบ (IT Security)',
+              department: 'IT Security',
               email: 'u01@windowasia.co.th',
               role: 'admin',
               kind: 'internal',
               use_ad_auth: true,
               active: true,
+              status_origin: 'LOCAL',
               projects: 'all',
               grant: [],
               deny: []
@@ -261,13 +281,16 @@ async function initDatabase() {
     memoryStore.collections.users.U01 = {
       id: 'U01',
       uid: 'U01',
+      username: 'admin',
       name: 'คุณปฏินันท์',
       title: 'ผู้ดูแลระบบ (IT Security)',
+      department: 'IT Security',
       email: 'u01@windowasia.co.th',
       role: 'admin',
       kind: 'internal',
       use_ad_auth: true,
       active: true,
+      status_origin: 'LOCAL',
       projects: 'all',
       grant: [],
       deny: []
@@ -491,6 +514,146 @@ function isUsingPostgres() {
   return usePostgres;
 }
 
+// --- Persistent Active Sessions (ISO/IEC 27001:2022 Session Lifecycle) ---
+
+async function saveSession(sessionId, sessionData = {}) {
+  if (!sessionId) return null;
+  const expiresAtMs = Number(sessionData.expiresAt) || (Date.now() + 480 * 60 * 1000);
+  const expiresIso = new Date(expiresAtMs).toISOString();
+  const authIso = sessionData.authenticatedAt || new Date().toISOString();
+  const normalized = {
+    userId: String(sessionData.userId || ''),
+    uid: String(sessionData.uid || sessionData.userId || ''),
+    username: String(sessionData.username || sessionData.uid || sessionData.userId || ''),
+    email: String(sessionData.email || ''),
+    authMethod: String(sessionData.authMethod || 'local'),
+    mustChangePassword: Boolean(sessionData.mustChangePassword),
+    authenticatedAt: authIso,
+    expiresAt: expiresAtMs
+  };
+
+  if (usePostgres) {
+    await pool.query(
+      `INSERT INTO active_sessions
+       (session_id, user_id, uid, username, email, auth_method, must_change_password, authenticated_at, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::timestamptz)
+       ON CONFLICT (session_id) DO UPDATE SET
+         user_id = EXCLUDED.user_id,
+         uid = EXCLUDED.uid,
+         username = EXCLUDED.username,
+         email = EXCLUDED.email,
+         auth_method = EXCLUDED.auth_method,
+         must_change_password = EXCLUDED.must_change_password,
+         expires_at = EXCLUDED.expires_at`,
+      [
+        sessionId,
+        normalized.userId,
+        normalized.uid,
+        normalized.username,
+        normalized.email,
+        normalized.authMethod,
+        normalized.mustChangePassword,
+        authIso,
+        expiresIso
+      ]
+    );
+  } else {
+    if (!memoryStore.active_sessions) memoryStore.active_sessions = {};
+    memoryStore.active_sessions[sessionId] = normalized;
+    saveFallbackStore();
+  }
+  return normalized;
+}
+
+async function getSession(sessionId) {
+  if (!sessionId) return null;
+  if (usePostgres) {
+    const res = await pool.query(
+      `SELECT session_id, user_id, uid, username, email, auth_method, must_change_password, authenticated_at, expires_at
+       FROM active_sessions
+       WHERE session_id = $1`,
+      [sessionId]
+    );
+    if (!res.rows.length) return null;
+    const row = res.rows[0];
+    const expiresAtMs = new Date(row.expires_at).getTime();
+    if (!Number.isFinite(expiresAtMs) || Date.now() > expiresAtMs) {
+      await deleteSession(sessionId);
+      return null;
+    }
+    return {
+      userId: row.user_id,
+      uid: row.uid || row.user_id,
+      username: row.username || row.uid || row.user_id,
+      email: row.email || '',
+      authMethod: row.auth_method || 'local',
+      mustChangePassword: Boolean(row.must_change_password),
+      authenticatedAt: new Date(row.authenticated_at).toISOString(),
+      expiresAt: expiresAtMs
+    };
+  }
+
+  const sess = memoryStore.active_sessions?.[sessionId];
+  if (!sess) return null;
+  if (sess.expiresAt && Date.now() > Number(sess.expiresAt)) {
+    delete memoryStore.active_sessions[sessionId];
+    saveFallbackStore();
+    return null;
+  }
+  return sess;
+}
+
+async function deleteSession(sessionId) {
+  if (!sessionId) return false;
+  if (usePostgres) {
+    await pool.query('DELETE FROM active_sessions WHERE session_id = $1', [sessionId]);
+  } else if (memoryStore.active_sessions && sessionId in memoryStore.active_sessions) {
+    delete memoryStore.active_sessions[sessionId];
+    saveFallbackStore();
+  }
+  return true;
+}
+
+async function deleteUserSessions(identifiers = []) {
+  const keys = Array.from(
+    new Set(
+      (Array.isArray(identifiers) ? identifiers : [identifiers])
+        .filter(Boolean)
+        .map(v => String(v).trim().toLowerCase())
+        .filter(Boolean)
+    )
+  );
+  if (!keys.length) return 0;
+
+  if (usePostgres) {
+    const res = await pool.query(
+      `DELETE FROM active_sessions
+       WHERE LOWER(COALESCE(user_id, '')) = ANY($1)
+          OR LOWER(COALESCE(uid, '')) = ANY($1)
+          OR LOWER(COALESCE(username, '')) = ANY($1)
+          OR LOWER(COALESCE(email, '')) = ANY($1)`,
+      [keys]
+    );
+    return res.rowCount || 0;
+  }
+
+  let removed = 0;
+  if (memoryStore.active_sessions) {
+    const keySet = new Set(keys);
+    for (const [sid, sess] of Object.entries(memoryStore.active_sessions)) {
+      const candidates = [sess.userId, sess.uid, sess.username, sess.email]
+        .filter(Boolean)
+        .map(v => String(v).trim().toLowerCase());
+      if (candidates.some(c => keySet.has(c))) {
+        delete memoryStore.active_sessions[sid];
+        removed++;
+      }
+    }
+    if (removed > 0) saveFallbackStore();
+  }
+  return removed;
+}
+
 module.exports = {
   VALID_COLLECTIONS,
   DEFAULT_SYSTEM_SETTINGS,
@@ -508,5 +671,9 @@ module.exports = {
   getSystemSettings,
   updateSystemSettings,
   insertAuditLog,
-  getAuditLogs
+  getAuditLogs,
+  saveSession,
+  getSession,
+  deleteSession,
+  deleteUserSessions
 };

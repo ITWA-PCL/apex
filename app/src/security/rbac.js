@@ -70,8 +70,52 @@ const EXT_DENY = [
   'bid.win', 'team.edit', 'view.port', 'proj.edit', 'hours.edit'
 ];
 
-// Active SSO sessions in memory
+// Active SSO sessions in memory (backed by db.saveSession / db.getSession for persistence across restarts)
 const ssoSessions = new Map();
+
+function normalizeIdentityKey(val) {
+  return String(val || '').trim().toLowerCase();
+}
+
+function findMatchingUser(users = [], { userId, uid, username, email } = {}) {
+  const idKeys = [userId, uid, username].map(normalizeIdentityKey).filter(Boolean);
+  if (idKeys.length) {
+    const byId = users.find(u => {
+      const candidates = [u.id, u.uid, u.username, u.external_id]
+        .map(normalizeIdentityKey)
+        .filter(Boolean);
+      return idKeys.some(k => candidates.includes(k));
+    });
+    if (byId) return byId;
+  }
+  const emailKey = normalizeIdentityKey(email);
+  if (emailKey) {
+    return users.find(u => normalizeIdentityKey(u.email) === emailKey) || null;
+  }
+  return null;
+}
+
+async function revokeUserSessions(userOrId) {
+  const rawList =
+    userOrId && typeof userOrId === 'object'
+      ? [userOrId.id, userOrId.uid, userOrId.username, userOrId.external_id, userOrId.email]
+      : [userOrId];
+  const keys = new Set(rawList.map(normalizeIdentityKey).filter(Boolean));
+  if (!keys.size) return 0;
+
+  let removed = 0;
+  for (const [sessId, sess] of ssoSessions.entries()) {
+    const candidates = [sess?.userId, sess?.uid, sess?.username, sess?.email]
+      .map(normalizeIdentityKey)
+      .filter(Boolean);
+    if (candidates.some(c => keys.has(c))) {
+      ssoSessions.delete(sessId);
+      removed++;
+    }
+  }
+  const dbRemoved = await db.deleteUserSessions(Array.from(keys));
+  return Math.max(removed, dbRemoved || 0);
+}
 
 function parseCookies(cookieHeader = '') {
   const out = {};
@@ -123,7 +167,19 @@ async function resolveRequestUser(req, res, next) {
   try {
     const cookies = parseCookies(req.headers.cookie || '');
     const sessionToken = cookies.apex_session;
-    const sessionData = sessionToken ? ssoSessions.get(sessionToken) : null;
+    let sessionData = sessionToken ? ssoSessions.get(sessionToken) : null;
+    if (sessionToken && !sessionData) {
+      sessionData = await db.getSession(sessionToken);
+      if (sessionData) {
+        ssoSessions.set(sessionToken, sessionData);
+      }
+    }
+
+    if (sessionData && sessionData.expiresAt && Date.now() > Number(sessionData.expiresAt)) {
+      ssoSessions.delete(sessionToken);
+      await db.deleteSession(sessionToken);
+      sessionData = null;
+    }
 
     const trustGateway = process.env.TRUST_PROXY_AUTH_HEADERS === 'true';
     const gatewayUserId = trustGateway ? req.headers['x-user-id'] || '' : '';
@@ -135,24 +191,27 @@ async function resolveRequestUser(req, res, next) {
 
     let matchedUser = null;
     if (sessionData) {
-      matchedUser = users.find(
-        u =>
-          u.id === sessionData.userId ||
-          u.uid === sessionData.uid ||
-          (u.email && u.email.toLowerCase() === (sessionData.email || '').toLowerCase())
-      );
+      matchedUser = findMatchingUser(users, {
+        userId: sessionData.userId,
+        uid: sessionData.uid,
+        username: sessionData.username,
+        email: sessionData.email
+      });
     } else if (gatewayUserId || gatewayEmail) {
-      matchedUser = users.find(
-        u =>
-          u.uid === gatewayUserId ||
-          u.id === gatewayUserId ||
-          (gatewayEmail && u.email && u.email.toLowerCase() === gatewayEmail.toLowerCase())
-      );
+      matchedUser = findMatchingUser(users, {
+        userId: gatewayUserId,
+        uid: gatewayUserId,
+        username: gatewayUserId,
+        email: gatewayEmail
+      });
     }
 
     // Inactive Account Guard (SSO-04): If no matching user or user is disabled, invalidate session
     if (!matchedUser || matchedUser.active === false) {
-      if (sessionToken) ssoSessions.delete(sessionToken);
+      if (sessionToken) {
+        ssoSessions.delete(sessionToken);
+        await db.deleteSession(sessionToken);
+      }
       req.apexAuthenticated = false;
       req.apexUser = null;
       return next();
@@ -174,15 +233,20 @@ async function resolveRequestUser(req, res, next) {
     req.apexUser = {
       id: effectiveUser.id,
       uid: effectiveUser.uid || effectiveUser.id,
+      username: effectiveUser.username || effectiveUser.uid || effectiveUser.id,
       name: effectiveUser.name || 'ผู้ดูแลระบบ',
       email: effectiveUser.email || gatewayEmail || '',
       role: effectiveUser.role || 'viewer',
-      department: gatewayDept || effectiveUser.title || 'Operations',
+      department: gatewayDept || effectiveUser.department || effectiveUser.title || 'Operations',
       active: true,
       kind:
         effectiveUser.kind ||
         (['contractor', 'customer'].includes(effectiveUser.role) ? 'external' : 'internal'),
       use_ad_auth: effectiveUser.use_ad_auth ?? !['contractor', 'customer'].includes(effectiveUser.role),
+      status_origin: effectiveUser.status_origin || 'LOCAL',
+      is_status_locked: Boolean(effectiveUser.is_status_locked),
+      must_change_password: Boolean(effectiveUser.must_change_password || sessionData?.mustChangePassword),
+      last_login_at: effectiveUser.last_login_at || effectiveUser.lastSeen || null,
       projects: effectiveUser.projects || 'all',
       team: effectiveUser.team || '',
       permissions: perms,
@@ -414,6 +478,9 @@ function isDocInUserScope(collection, doc, user) {
 function sanitizeDocForResponse(collection, doc, user) {
   if (!doc || typeof doc !== 'object') return doc;
   const clone = { ...doc };
+  if (collection === 'users') {
+    clone.has_password = Boolean(doc.password_hash || doc.has_password);
+  }
   delete clone.password;
   delete clone.password_hash;
   delete clone.admin_password_hash;
@@ -455,6 +522,8 @@ module.exports = {
   COLLECTION_ACCESS_RULES,
   ssoSessions,
   parseCookies,
+  findMatchingUser,
+  revokeUserSessions,
   computeEffectivePermissions,
   resolveRequestUser,
   normalizeApiPath,
