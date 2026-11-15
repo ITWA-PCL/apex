@@ -8,28 +8,23 @@
 
 ## Latest Handoff Status (จุดพักงานล่าสุด — พร้อมกลับมาทำต่อได้ทันที)
 
-- **วันที่ / เวลาบันทึกส่งมอบ:** `2026-11-15 13:26 (+07:00)`
+- **วันที่ / เวลาบันทึกส่งมอบ:** `2026-11-15 16:20 (+07:00)`
 - **ผู้ส่งมอบงานล่าสุด:** Lead Security & Core Architect (คุณ — Track A ร่วมกับ Antigravity AI)
 - **ชื่อโปรเจกต์หลัก:** **APEX** (`https://apex.windowasia.com` — ระบบควบคุมงานติดตั้งประตู-หน้าต่าง)
 - **โฟลเดอร์หลักของโปรเจกต์บนเครื่อง Local (ทั้งเครื่องคุณและเครื่อง CFO):** **`D:\Python\APEX`**
 - **โฟลเดอร์ Production บน Hostinger VPS:** **`/var/www/Apex`**
 - **Git Remote ของบริษัท:** `https://github.com/ITWA-PCL/apex.git`
 - **Git Branch & Commit ล่าสุด:**
-  - Branch งาน Security ล่าสุดของคุณ (Track A): **`Sec1`** (ต่อยอดจาก PR #6 `8cb2bd4` และ `origin/main`)
-  - **แพตช์ล่าสุดบน `Sec1` (T2.10: มาตรฐานบัญชี 3 ประเภท, Invite/Register, 2FA OTP, Telegram Bot & Email Settings — ISO 27001 & CIAM):**
-    - `app/src/db/postgres.js`: เพิ่มค่าตั้งต้น 14 รายการใน `DEFAULT_SYSTEM_SETTINGS` สำหรับ `telegram_*` (`telegram_enabled`, `telegram_bot_token`, `telegram_chat_id`, `telegram_notify_login`, `telegram_notify_user_provision`, `telegram_notify_security_alert`), `email_*`/`smtp_*`, และ `login_otp_external`
-    - `app/src/security/notifier.js`: สร้างโมดูลแจ้งเตือน Zero-Dependency (`crypto`, `net`, `tls`, `fetch`) รองรับ Telegram Bot API (`NOTIFY-TELEGRAM`), Email Webhook + Native SMTP TLS/STARTTLS (`NOTIFY-EMAIL`), การสร้างคำเชิญลงทะเบียนครั้งแรก (`createRegistrationInvite` + `USER-INVITE` อายุ 24 ชม.), และ OTP 6 หลัก (`createAndSendOtpChallenge` + `OTP-SEND` อายุ 5 นาที)
-    - `app/src/security/rbac.js`: เพิ่ม `/api/auth/register-first-time`, `/api/auth/otp/request`, `/api/auth/otp/verify` ใน `PUBLIC_API_PATHS` และคัดกรอง `invite_token_hash`, `invite_otp_hash`, `otp_code_hash` ออกจาก `sanitizeDocForResponse` (เปิดเผยเฉพาะ `has_pending_invite`)
-    - `app/src/security/ciam.js`: อัปเดต Group A (`/api/settings/ciam-sso` GET/POST) สำหรับค่า Telegram/Email/OTP พร้อม Mask Secrets (`telegram_bot_token_masked`, `smtp_password_masked`), เพิ่ม `POST /api/settings/notifications/test-telegram` & `test-email`, บังคับกฎ 3 ประเภทใน `POST /api/auth/login` (`403 ad_sso_required` + `SSO-02`, `403 registration_required`, `200 otp_required`), และเพิ่ม `/api/auth/otp/request`, `/api/auth/register-first-time` (`USER-REGISTER`), `/api/auth/otp/verify` (`OTP-VERIFY`/`OTP-FAIL`), `/api/v1/users/:id/send-invite`
-    - `app/src/workflow/collections-api.js`: ปรับ `prepareUserMutation` & `finalizeMutationSideEffects` ให้บังคับ `use_ad_auth: false` สำหรับ `external` เสมอ, ล้าง `password_hash` บน `active_ad`, รองรับ `telegram_chat_id`/`otp_enabled`/`send_invite`, และส่งคำเชิญอัตโนมัติเมื่อสร้างบัญชี Non-AD ที่ยังไม่กำหนดรหัสผ่าน
-    - `app/public/js/ciam-admin-panel.js`: เพิ่ม Card 3 ในหน้า Settings (`#v-settings`) สำหรับ **Telegram Bot & Email/OTP** พร้อมปุ่มทดสอบ `#btnTestTelegram` / `#btnTestEmail`, เพิ่ม `renderFirstTimeRegistrationModal` (รองรับเปิดอัตโนมัติจาก `?register_token=...`) และ `renderLoginOtpModal`
-    - `app/public/index.html`: ปรับหน้า `#v-users` (`usersHtml`, `userForm`, `saveUser`, `userEvents`) ให้มี `email` (Required), `telegram_chat_id`, แยกป้าย 3 ประเภท (`🔐 Internal · AD Only`, `🔑 Internal · Local`, `👷 External · Local`) + `⏳ รอลงทะเบียนครั้งแรก` + `🔒 2FA OTP`, ล็อก Auth สำหรับ `external`, และปุ่ม `📨 ส่งคำเชิญ/OTP` พร้อมหน้าต่างแสดงลิงก์/รหัส OTP
-    - `scripts/verify-local.js`: เพิ่ม `'app/src/security/notifier.js'` และ **Section 12** ทดสอบ 3-tier classification, AD-only block, `send-invite` + `register-first-time`, 2FA OTP flow, Telegram/Email Settings & Secret Masking
-  - **แพตช์ก่อนหน้าบน `Sec1` (PR #6 `8cb2bd4`):** Persistent Session `active_sessions`, `ciam_auto_provision_group`, `ciam_session_ttl_minutes`, Responsive Login Gate, `is_status_locked`, Group C/D Spec C.1/C.2
+  - Branch งาน Security ล่าสุดของคุณ (Track A): **`Sec1`** (ซิงค์ `origin/main` ที่ `e1d1d5d` via fast-forward และเพิ่มแพตช์ PR Review Hardening)
+  - **แพตช์ล่าสุดบน `Sec1` (Security Hardening: Password-First 2FA OTP, Purpose Binding & Mandatory SMTP/Webhook TLS):**
+    - `app/src/security/notifier.js`: บังคับ `STARTTLS` สำหรับพอร์ต SMTP ที่ไม่ใช่ 465 (ลบ silent fallback ออก และเช็ก `!isTlsEncrypted || !socket.encrypted` ก่อน `AUTH LOGIN`, `MAIL FROM`, `DATA` เสมอ), รองรับ Direct TLS พอร์ต 465 + `waitForTlsHandshake` + `rejectUnauthorized !== false`, บังคับ `https://` สำหรับ `email_webhook_url`, ล้าง `otp_password_verified_*` เมื่อขอ `'register'` OTP, และ export `sendSmtpMail` สำหรับทดสอบ
+    - `app/src/security/ciam.js`: บังคับ Pre-Auth Password Window (`otp_password_verified_until` 10 นาที) ใน `POST /api/auth/login` ก่อนอนุญาต `POST /api/auth/otp/request` (`login_2fa`) และ `POST /api/auth/otp/verify` (และล้างทันทีเมื่อกรอกรหัสผ่านผิด), บังคับ Purpose Binding (`400 otp_purpose_mismatch`) ห้ามนำ `login_2fa` OTP ใช้ใน `/api/auth/register-first-time` และห้ามนำ `register` OTP ใช้ใน `/api/auth/otp/verify`, ปิดช่องโหว่ขอ `'register'` OTP บนบัญชีที่ลงทะเบียนแล้ว (`403 already_registered`) และปฏิเสธ `purpose` ที่ไม่รู้จัก (`400 invalid_otp_purpose`)
+    - `app/src/security/rbac.js`: ลบ `otp_password_verified_at` และ `otp_password_verified_until` ออกจาก `sanitizeDocForResponse`
+    - `scripts/verify-local.js`: ขยาย **Section 12c** ทดสอบ Password-First 2FA OTP Guard, Failed Password Invalidation, OTP Purpose Mismatch ทั้ง 2 ทิศทาง และเพิ่ม **Section 12e** จำลอง Non-TLS Mock SMTP Server ยืนยันว่าไม่ส่ง `AUTH LOGIN`/รหัสผ่าน/`DATA`/OTP เมื่อไม่มี TLS และบล็อก `http://` Webhook
+  - **แพตช์ก่อนหน้าบน `Sec1` (PR #7 `e1d1d5d` & PR #6 `0c93d48`):** มาตรฐานบัญชี 3 ประเภท (`Internal · AD Only`, `Internal · Local`, `External · Local`), First-Time Invite/Register, Telegram Bot/Email/OTP Settings UI, Persistent Session `active_sessions`, Group C/D Spec C.1/C.2
   - Branch ของ CFO (Track B): `feat/flow-cfo`
 - **สถานะการทดสอบ (Local Compile & Verification บน Branch `Sec1`):**
-  - `node scripts/verify-local.js`: **ผ่านครบถ้วน 100% (`0 Errors`)** (14 Syntax checks + Sections 1–12 Security/Auth/Session/OTP/Notification/Finance/CIAM checks)
-  - Inline Script Check (`app/public/index.html` ผ่าน `vm.Script`): **ผ่าน Cleanly (`Verified inline scripts: 1`)**
+  - `node scripts/verify-local.js`: **ผ่านครบถ้วน 100% (`0 Errors`)** (14 Syntax checks + Sections 1–12 รวมถึง 12c Password-First/Purpose Binding และ 12e SMTP/Webhook TLS)
 
 ---
 
