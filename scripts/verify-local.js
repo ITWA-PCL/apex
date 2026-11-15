@@ -700,6 +700,217 @@ async function runVerification() {
   assert.strictEqual(forcePatchRes.statusCode, 200, 'Authority override with force_override=true must succeed');
   console.log(' [OK] Spec v2.12.0 CIAM Authority Lock (is_status_locked) & 1-Click Status API verified');
 
+  // 11. Enterprise User Management, Persistent Session DB, Complexity, Revocation & Group C Spec
+  async function invokeCiamReq(method, reqPath, { headers = {}, body = null, query = {} } = {}) {
+    return new Promise(resolve => {
+      const req = {
+        method,
+        path: reqPath,
+        url: reqPath,
+        originalUrl: reqPath,
+        query,
+        headers,
+        body
+      };
+      const res = {
+        statusCode: 200,
+        headers: {},
+        body: null,
+        setHeader(k, v) {
+          this.headers[k] = v;
+        },
+        status(code) {
+          this.statusCode = code;
+          return this;
+        },
+        json(payload) {
+          this.body = payload;
+          resolve({ statusCode: this.statusCode, headers: this.headers, body: payload });
+          return this;
+        }
+      };
+      ciamRouter.handle(req, res, () => {
+        resolve({ statusCode: res.statusCode, headers: res.headers, body: res.body });
+      });
+    });
+  }
+
+  // 11a. Login by username (case-insensitive) -> persistent DB session + last_login_at/lastSeen
+  await db.setDoc(
+    'users',
+    'USR_LOGIN_1',
+    {
+      id: 'USR_LOGIN_1',
+      uid: 'somchai.p',
+      username: 'somchai.p',
+      department: 'Engineering',
+      email: 'somchai.p@windowasia.com',
+      name: 'Somchai Test',
+      role: 'pm',
+      kind: 'internal',
+      projects: 'all',
+      active: true,
+      use_ad_auth: false,
+      password_hash: db.hashPassword('ApexPass#2026'),
+      password_changed_at: new Date().toISOString(),
+      must_change_password: false
+    },
+    'test'
+  );
+
+  const usernameLoginRes = await invokeCiamReq('POST', '/api/auth/login', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: {
+      identifier: 'SOMCHAI.P',
+      password: 'ApexPass#2026',
+      form_render_ts: Date.now() - 2000
+    }
+  });
+  assert.strictEqual(usernameLoginRes.statusCode, 200, 'Case-insensitive username login must succeed');
+  const setCookieHeader = usernameLoginRes.headers['Set-Cookie'] || usernameLoginRes.headers['set-cookie'] || '';
+  const cookieMatch = String(setCookieHeader).match(/apex_session=([^;]+)/);
+  assert.ok(cookieMatch && cookieMatch[1], 'Login response must issue apex_session cookie');
+  const persistedToken = cookieMatch[1];
+
+  const dbSession = await db.getSession(persistedToken);
+  assert.ok(dbSession, 'Session must be persisted to PostgreSQL / active_sessions fallback store');
+  assert.strictEqual(dbSession.userId, 'USR_LOGIN_1', 'Persisted DB session must point to USR_LOGIN_1');
+
+  const updatedUsr1 = await db.getDoc('users', 'USR_LOGIN_1');
+  assert.ok(updatedUsr1.last_login_at && updatedUsr1.lastSeen, 'Login must update last_login_at and lastSeen');
+
+  // Simulate process restart by clearing in-memory Map, verify resolveRequestUser recovers from DB
+  rbac.ssoSessions.delete(persistedToken);
+  await new Promise((resolve, reject) => {
+    const req = { headers: { cookie: `apex_session=${persistedToken}` } };
+    const res = {};
+    rbac.resolveRequestUser(req, res, err => {
+      if (err) return reject(err);
+      assert.ok(req.apexUser, 'resolveRequestUser must recover session from persistent DB after memory clear');
+      assert.strictEqual(req.apexUser.id, 'USR_LOGIN_1');
+      assert.strictEqual(req.apexUser.username, 'somchai.p');
+      resolve();
+    });
+  });
+
+  // 11b. Local User Management via /api/v1/db/users: complexity + duplicate username + audit + sanitization
+  const weakPwdCreate = await invokeCollectionsRoute('POST', '/api/v1/db/users', 'U01', {
+    id: 'USR_WEAK',
+    name: 'Weak User',
+    username: 'weak.user',
+    role: 'contractor',
+    kind: 'external',
+    company: 'Test Co',
+    team: 'T01',
+    projects: ['P01'],
+    use_ad_auth: false,
+    password: 'weak'
+  });
+  assert.strictEqual(weakPwdCreate.statusCode, 400, 'Weak password on POST /api/v1/db/users must be rejected');
+  assert.strictEqual(weakPwdCreate.body.error, 'complexity_violation');
+
+  const dupUsernameCreate = await invokeCollectionsRoute('POST', '/api/v1/db/users', 'U01', {
+    id: 'USR_DUP',
+    name: 'Dup Username',
+    username: 'SOMCHAI.P',
+    role: 'pm',
+    kind: 'internal',
+    projects: 'all',
+    use_ad_auth: true
+  });
+  assert.strictEqual(dupUsernameCreate.statusCode, 400, 'Duplicate username must be rejected');
+  assert.strictEqual(dupUsernameCreate.body.error, 'duplicate_username');
+
+  const validLocalCreate = await invokeCollectionsRoute('POST', '/api/v1/db/users', 'U01', {
+    id: 'USR_LOCAL_OK',
+    name: 'Valid Contractor',
+    username: 'contractor.k',
+    department: 'Subcon Team A',
+    email: 'contractor.k@example.com',
+    role: 'contractor',
+    kind: 'external',
+    company: 'Subcon Co.',
+    team: 'T01',
+    projects: ['P01'],
+    use_ad_auth: false,
+    password: 'TeamPass#889',
+    must_change_password: true
+  });
+  assert.strictEqual(validLocalCreate.statusCode, 201, 'Valid local user creation must succeed');
+  assert.strictEqual(validLocalCreate.body.data.has_password, true, 'Response must expose has_password=true');
+  assert.strictEqual(validLocalCreate.body.data.password_hash, undefined, 'Response must never expose password_hash');
+  assert.strictEqual(validLocalCreate.body.data.password, undefined, 'Response must never expose plaintext password');
+
+  // 11c. Deactivating user via PATCH /api/v1/db/users/:id revokes sessions & enforces is_status_locked
+  const deactivateRes = await invokeCollectionsRoute('PATCH', '/api/v1/db/users/USR_LOGIN_1', 'U01', {
+    active: false
+  });
+  assert.strictEqual(deactivateRes.statusCode, 200, 'Deactivating non-locked user must succeed');
+  assert.strictEqual(rbac.ssoSessions.has(persistedToken), false, 'In-memory session must be revoked on disable');
+  assert.strictEqual(await db.getSession(persistedToken), null, 'Persisted DB session must be revoked on disable');
+
+  const spokeLockAttempt = await invokeCollectionsRoute('PATCH', '/api/v1/db/users/LOCK01', 'U01', {
+    active: true
+  });
+  assert.strictEqual(spokeLockAttempt.statusCode, 409, 'Updating active status on CIAM-locked user must return 409');
+  assert.strictEqual(spokeLockAttempt.body.error, 'status_locked');
+
+  const logsAfterMgmt = await db.getAuditLogs(30);
+  assert.ok(logsAfterMgmt.some(l => l.event_code === 'USER-CREATE' && l.target_resource === 'users/USR_LOCAL_OK'), 'USER-CREATE audit log must be recorded');
+  assert.ok(logsAfterMgmt.some(l => l.event_code === 'SSO-04' && l.target_resource === 'users/USR_LOGIN_1'), 'SSO-04 revocation audit log must be recorded');
+  assert.ok(logsAfterMgmt.some(l => l.event_code === 'SPOKE_OVERRIDE_REJECTED' && l.target_resource === 'users/LOCK01'), 'SPOKE_OVERRIDE_REJECTED audit log must be recorded');
+
+  // 11d. Group C Directory API Spec C.1/C.2 (/api/v1/directory/accounts*)
+  const ciamPostAccount = await invokeCiamReq('POST', '/api/v1/directory/accounts', {
+    headers: {
+      'x-management-api-key': 'test_mgmt_key_123',
+      'x-forwarded-for': '157.173.219.153'
+    },
+    body: {
+      username: 'ciam.user1',
+      full_name: 'CIAM User One',
+      email: 'ciam.user1@windowasia.com',
+      department: 'IT',
+      group_name: 'qc',
+      is_active: true
+    }
+  });
+  assert.strictEqual(ciamPostAccount.statusCode, 201, 'Group C POST /api/v1/directory/accounts must create user');
+  assert.strictEqual(ciamPostAccount.body.account.username, 'ciam.user1');
+  assert.strictEqual(ciamPostAccount.body.account.group_name, 'qc');
+
+  const ciamPostDup = await invokeCiamReq('POST', '/api/v1/directory/accounts', {
+    headers: {
+      'x-management-api-key': 'test_mgmt_key_123',
+      'x-forwarded-for': '157.173.219.153'
+    },
+    body: {
+      username: 'ciam.user1',
+      full_name: 'Duplicate User',
+      group_name: 'viewer'
+    }
+  });
+  assert.strictEqual(ciamPostDup.statusCode, 409, 'Group C duplicate POST without upsert must return 409 Conflict');
+
+  const ciamListFiltered = await invokeCiamReq('GET', '/api/v1/directory/accounts', {
+    headers: {
+      'x-management-api-key': 'test_mgmt_key_123',
+      'x-forwarded-for': '157.173.219.153'
+    },
+    query: { status: 'active', department: 'IT' }
+  });
+  assert.strictEqual(ciamListFiltered.statusCode, 200, 'Group C filtered GET must return 200');
+  assert.ok(ciamListFiltered.body.summary && typeof ciamListFiltered.body.summary.total === 'number', 'Group C GET must return Spec C.1 summary');
+  assert.ok(
+    ciamListFiltered.body.accounts.some(a => a.username === 'ciam.user1' && a.department === 'IT'),
+    'Filtered Group C response must contain matching active IT department account'
+  );
+  assert.ok(
+    ciamListFiltered.body.accounts.every(a => a.is_active === true && String(a.department).toLowerCase().includes('it')),
+    'Filtered Group C response must exclude non-matching status/department accounts'
+  );
+  console.log(' [OK] Enterprise User Management, Persistent DB Session, Revocation & Group C Spec C.1/C.2 verified');
+
   console.log('=================================================================');
   console.log(' ✅ ALL LOCAL COMPILE & SECURITY/FINANCE CHECKS PASSED (0 ERRORS)');
   console.log('=================================================================');

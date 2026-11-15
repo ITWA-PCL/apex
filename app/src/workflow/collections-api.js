@@ -10,7 +10,8 @@ const {
   canWriteCollection,
   isDocInUserScope,
   sanitizeDocForResponse,
-  filterAndSanitizeCollectionForUser
+  filterAndSanitizeCollectionForUser,
+  revokeUserSessions
 } = require('../security/rbac');
 
 const router = express.Router();
@@ -39,6 +40,201 @@ function sanitizeIncomingUserPayload(body = {}, existingDoc = null) {
   }
   delete payload.password;
   return payload;
+}
+
+async function prepareUserMutation(req, res, targetId, existingDoc, rawBody = {}) {
+  const docId = String(targetId || rawBody.id || existingDoc?.id || '').trim();
+
+  if (docId === 'U01' && rawBody.role && rawBody.role !== 'admin') {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'ไม่อนุญาตให้ลดระดับสิทธิ์ของบัญชีผู้ดูแลระบบหลัก (U01)'
+    });
+    return null;
+  }
+
+  if (docId === 'U01' && (rawBody.active === false || rawBody.is_active === false)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'ไม่อนุญาตให้ปิดการใช้งานบัญชีผู้ดูแลระบบหลัก (U01)'
+    });
+    return null;
+  }
+
+  if (existingDoc && existingDoc.is_status_locked === true && rawBody.force_override !== true) {
+    const prevActive = existingDoc.active !== false && existingDoc.is_active !== false;
+    const hasActiveFlag = rawBody.active !== undefined || rawBody.is_active !== undefined;
+    if (hasActiveFlag) {
+      const nextActive =
+        rawBody.active !== undefined ? Boolean(rawBody.active) : Boolean(rawBody.is_active);
+      if (nextActive !== prevActive) {
+        await db.insertAuditLog({
+          eventCode: 'SPOKE_OVERRIDE_REJECTED',
+          actorId: req.apexUser?.id || null,
+          actorEmail: req.apexUser?.email || null,
+          actorRole: req.apexUser?.role || null,
+          ipAddress: req.ip,
+          targetResource: `users/${docId}`,
+          details: { reason: 'is_status_locked', attempted_active: nextActive }
+        });
+        res.status(409).json({
+          error: 'status_locked',
+          message:
+            'บัญชีนี้ถูกล็อกสถานะจาก Central IAM (CIAM) ไม่สามารถเปิด/ปิดการใช้งานจากฝั่ง Spoke ได้'
+        });
+        return null;
+      }
+    }
+  }
+
+  if (rawBody.username !== undefined) {
+    const normalizedUsername = String(rawBody.username || '').trim();
+    if (!normalizedUsername) {
+      res.status(400).json({
+        error: 'invalid_username',
+        message: 'กรุณาระบุ Username สำหรับเข้าสู่ระบบ'
+      });
+      return null;
+    }
+    const existingUsers = await db.getCollection('users');
+    const dupUser = existingUsers.find((u) => {
+      if (!u || u.id === docId) return false;
+      const candidate = String(u.username || '').trim().toLowerCase();
+      return candidate && candidate === normalizedUsername.toLowerCase();
+    });
+    if (dupUser) {
+      res.status(400).json({
+        error: 'duplicate_username',
+        message: `Username "${normalizedUsername}" ถูกใช้งานโดยบัญชีอื่นแล้ว (${dupUser.name || dupUser.id})`
+      });
+      return null;
+    }
+  }
+
+  const effectiveUsername =
+    rawBody.username !== undefined
+      ? String(rawBody.username || '').trim()
+      : existingDoc?.username || rawBody.email || docId;
+  const hasPlainPassword = typeof rawBody.password === 'string' && rawBody.password.trim() !== '';
+
+  if (hasPlainPassword) {
+    const { validatePasswordComplexity } = require('../security/ciam');
+    const complexityErr = validatePasswordComplexity(rawBody.password.trim(), effectiveUsername);
+    if (complexityErr) {
+      res.status(400).json({
+        error: 'complexity_violation',
+        message: complexityErr
+      });
+      return null;
+    }
+  }
+
+  const payload = sanitizeIncomingUserPayload(rawBody, existingDoc);
+  delete payload.force_override;
+
+  if (rawBody.username !== undefined) {
+    payload.username = String(rawBody.username || '').trim();
+    if (!payload.uid && !existingDoc?.uid) {
+      payload.uid = payload.username;
+    }
+  }
+
+  if (hasPlainPassword) {
+    payload.password_changed_at = new Date().toISOString();
+    if (typeof rawBody.must_change_password === 'boolean') {
+      payload.must_change_password = rawBody.must_change_password;
+    }
+  } else if (typeof rawBody.must_change_password === 'boolean') {
+    payload.must_change_password = rawBody.must_change_password;
+  }
+
+  if (rawBody.use_ad_auth !== undefined) {
+    payload.use_ad_auth = Boolean(rawBody.use_ad_auth);
+    if (payload.use_ad_auth === true && rawBody.must_change_password === undefined) {
+      payload.must_change_password = false;
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  if (!existingDoc) {
+    const initActive =
+      rawBody.active !== undefined
+        ? Boolean(rawBody.active)
+        : rawBody.is_active !== undefined
+          ? Boolean(rawBody.is_active)
+          : true;
+    payload.id = payload.id || docId;
+    payload.uid = payload.uid || payload.username || docId;
+    payload.active = initActive;
+    payload.is_active = initActive;
+    payload.status_origin = payload.status_origin || 'LOCAL';
+    payload.status_updated_at = nowIso;
+  } else if (rawBody.active !== undefined || rawBody.is_active !== undefined) {
+    const nextActive =
+      rawBody.active !== undefined ? Boolean(rawBody.active) : Boolean(rawBody.is_active);
+    const prevActive = existingDoc.active !== false && existingDoc.is_active !== false;
+    payload.active = nextActive;
+    payload.is_active = nextActive;
+    if (nextActive !== prevActive) {
+      payload.status_origin = 'LOCAL';
+      payload.status_updated_at = nowIso;
+    }
+  }
+
+  return { payload, passwordUpdated: hasPlainPassword };
+}
+
+async function finalizeMutationSideEffects(req, collection, id, prevDoc, saved, passwordUpdated) {
+  if (collection === 'users' && saved) {
+    const wasActive = prevDoc ? prevDoc.active !== false && prevDoc.is_active !== false : null;
+    const isNowActive = saved.active !== false && saved.is_active !== false;
+
+    if (!isNowActive) {
+      await revokeUserSessions(saved);
+    }
+
+    let eventCode = 'USER-UPDATE';
+    if (!prevDoc) {
+      eventCode = 'USER-CREATE';
+    } else if (wasActive && !isNowActive) {
+      eventCode = 'SSO-04';
+    } else if (passwordUpdated) {
+      eventCode = 'PW-RESET';
+    } else if (wasActive === false && isNowActive) {
+      eventCode = 'USER-ACTIVATE';
+    }
+
+    await db.insertAuditLog({
+      eventCode,
+      actorId: req.apexUser?.id || null,
+      actorEmail: req.apexUser?.email || null,
+      actorRole: req.apexUser?.role || null,
+      ipAddress: req.ip,
+      targetResource: `users/${id}`,
+      details: {
+        username: saved.username || null,
+        email: saved.email || null,
+        role: saved.role || null,
+        active: isNowActive,
+        use_ad_auth: saved.use_ad_auth !== false,
+        must_change_password: Boolean(saved.must_change_password),
+        method: req.method
+      }
+    });
+  } else if (collection === 'roles' && saved) {
+    await db.insertAuditLog({
+      eventCode: 'ROLE-UPDATE',
+      actorId: req.apexUser?.id || null,
+      actorEmail: req.apexUser?.email || null,
+      actorRole: req.apexUser?.role || null,
+      ipAddress: req.ip,
+      targetResource: `roles/${id}`,
+      details: {
+        method: req.method,
+        permissions_count: Array.isArray(saved.perms) ? saved.perms.length : null
+      }
+    });
+  }
 }
 
 // Connected SSE clients for real-time onSnapshot updates across Desktop & Mobile PWA
@@ -286,15 +482,12 @@ async function authorizeAndSanitizeMutation(req, res, collection, targetId = nul
   }
 
   let payload = { ...(req.body || {}) };
+  let passwordUpdated = false;
   if (collection === 'users') {
-    payload = sanitizeIncomingUserPayload(payload, existingDoc);
-    if ((targetId || payload.id) === 'U01' && payload.role && payload.role !== 'admin') {
-      res.status(403).json({
-        error: 'forbidden',
-        message: 'ไม่อนุญาตให้ลดระดับสิทธิ์ของบัญชีผู้ดูแลระบบหลัก (U01)'
-      });
-      return null;
-    }
+    const prepared = await prepareUserMutation(req, res, targetId, existingDoc, payload);
+    if (!prepared) return null;
+    payload = prepared.payload;
+    passwordUpdated = prepared.passwordUpdated;
   } else {
     delete payload.password;
     delete payload.password_hash;
@@ -334,7 +527,7 @@ async function authorizeAndSanitizeMutation(req, res, collection, targetId = nul
     return null;
   }
 
-  return { existingDoc, payload };
+  return { existingDoc, payload, passwordUpdated };
 }
 
 router.post('/api/v1/db/:collection', async (req, res) => {
@@ -350,6 +543,7 @@ router.post('/api/v1/db/:collection', async (req, res) => {
     if (!auth) return;
 
     const saved = await db.setDoc(col, id, auth.payload, req.apexUser.id);
+    await finalizeMutationSideEffects(req, col, id, auth.existingDoc, saved, auth.passwordUpdated);
     broadcastCollectionChange(col, 'add', id);
     res.status(201).json({
       status: 'ok',
@@ -368,6 +562,14 @@ router.put('/api/v1/db/:collection/:id', async (req, res) => {
     if (!auth) return;
 
     const saved = await db.setDoc(collection, id, auth.payload, req.apexUser.id);
+    await finalizeMutationSideEffects(
+      req,
+      collection,
+      id,
+      auth.existingDoc,
+      saved,
+      auth.passwordUpdated
+    );
     broadcastCollectionChange(collection, 'set', id);
     res.json({
       status: 'ok',
@@ -386,6 +588,14 @@ router.patch('/api/v1/db/:collection/:id', async (req, res) => {
     if (!auth) return;
 
     const saved = await db.updateDoc(collection, id, auth.payload, req.apexUser.id);
+    await finalizeMutationSideEffects(
+      req,
+      collection,
+      id,
+      auth.existingDoc,
+      saved,
+      auth.passwordUpdated
+    );
     broadcastCollectionChange(collection, 'update', id);
     res.json({
       status: 'ok',
@@ -403,12 +613,31 @@ router.delete('/api/v1/db/:collection/:id', async (req, res) => {
     const auth = await authorizeAndSanitizeMutation(req, res, collection, id, true);
     if (!auth) return;
 
+    if (collection === 'users') {
+      if (id === 'U01') {
+        return res.status(403).json({
+          error: 'forbidden',
+          message: 'ไม่อนุญาตให้ลบบัญชีผู้ดูแลระบบหลัก (U01)'
+        });
+      }
+      if (auth.existingDoc && auth.existingDoc.is_status_locked === true) {
+        return res.status(409).json({
+          error: 'status_locked',
+          message: 'บัญชีนี้ถูกจัดการและล็อกสถานะโดย Central IAM (CIAM) ไม่สามารถลบจากฝั่ง Spoke ได้'
+        });
+      }
+      if (auth.existingDoc) {
+        await revokeUserSessions(auth.existingDoc);
+      }
+    }
+
     await db.deleteDoc(collection, id);
     await db.insertAuditLog({
       eventCode: 'DATA-DELETE',
       actorId: req.apexUser.id,
       actorEmail: req.apexUser.email,
       actorRole: req.apexUser.role,
+      ipAddress: req.ip,
       targetResource: `${collection}/${id}`,
       details: { action: 'delete' }
     });

@@ -1296,6 +1296,7 @@ async function write(fn,okText){
   catch(e){
     if(e&&e.code==='invalid_argument'&&!DEMO){sysWrite=false;canWrite=false;toast('บันทึกไม่ได้: บัญชีนี้มีสิทธิ์ดูอย่างเดียว');renderAll();}
     else if(e&&e.code==='quota_exceeded')toast('พื้นที่ข้อมูลเต็ม ลบช่องหรือ NCR ที่ไม่ใช้ก่อน');
+    else if(e&&e.serverMessage)toast(e.serverMessage);
     else toast('บันทึกไม่สำเร็จ ลองอีกครั้ง');
     return false;
   }finally{busy=false;}
@@ -4166,42 +4167,60 @@ function renderUsers(){
   ${uTab==='roles'?rolesHtml():usersHtml()}`;
 }
 function usersHtml(){
-  const rm=roleMap(),order=Object.keys(rm);
+  const rm=roleMap(),order=Object.keys(rm),curUserId=realUser()?.id;
+  const isAdAuth=u=>u.use_ad_auth!==undefined?Boolean(u.use_ad_auth):(uKindOf(u)!=='external'&&u.id!=='U01');
   const us=(state.users||[]).slice().sort((a,b)=>(a.active===false)-(b.active===false)||order.indexOf(a.role)-order.indexOf(b.role)||a.name.localeCompare(b.name,'th'));
   const nIn=us.filter(u=>uKindOf(u)==='internal').length,nEx=us.length-nIn;
-  const list=us.filter(u=>uKindOf(u)===uKind&&(!uRole||u.role===uRole)&&(!uQ||(u.name+' '+(u.email||'')+' '+(u.phone||'')).toLowerCase().includes(uQ.toLowerCase())));
-  const f=uForm&&(uForm==='new'?(uKind==='external'?{kind:'external',role:'contractor',projects:[],active:true,grant:[],deny:[]}:{kind:'internal',role:'foreman',projects:'all',active:true,grant:[],deny:[]}):us.find(u=>u.id===uForm)),ro=canWrite?'':'disabled';
+  const list=us.filter(u=>uKindOf(u)===uKind&&(!uRole||u.role===uRole)&&(!uQ||(u.name+' '+(u.username||'')+' '+(u.department||'')+' '+(u.email||'')+' '+(u.phone||'')).toLowerCase().includes(uQ.toLowerCase())));
+  const f=uForm&&(uForm==='new'?(uKind==='external'?{kind:'external',role:'contractor',projects:[],active:true,use_ad_auth:false,grant:[],deny:[]}:{kind:'internal',role:'foreman',projects:'all',active:true,use_ad_auth:true,grant:[],deny:[]}):us.find(u=>u.id===uForm)),ro=canWrite?'':'disabled';
   return `<div class="kpis">${kpi('ผู้ใช้ทั้งหมด',us.length,`ใช้งาน ${us.filter(u=>u.active!==false).length} · ระงับ ${us.filter(u=>u.active===false).length}`)}${kpi('บทบาท',order.length,`กำหนดเอง ${order.filter(k=>!rm[k].builtin).length}`)}${kpi('ปรับสิทธิ์รายบุคคล',us.filter(u=>(u.grant||[]).length||(u.deny||[]).length).length,'คนที่มีสิทธิ์ต่างจากบทบาท')}${kpi('ผู้ดูแลระบบ',us.filter(u=>u.role==='admin'&&u.active!==false).length,'ต้องมีอย่างน้อย 1 คน')}</div>
   <div class="seg subseg" style="margin:12px 0"><button class="n" data-ukind="internal" aria-pressed="${uKind==='internal'}">ผู้ใช้ภายใน (พนักงาน) <span class="pill">${nIn}</span></button><button class="n" data-ukind="external" aria-pressed="${uKind==='external'}">ผู้ใช้ภายนอก (ผู้รับเหมา / ลูกค้า / ที่ปรึกษา) <span class="pill">${nEx}</span></button></div>
-  <div class="card"><div class="card-head"><h2>${uKind==='external'?'ผู้ใช้ภายนอก':'ผู้ใช้ภายใน'}</h2><div class="row"><input type="text" id="uQ" value="${esc(uQ)}" placeholder="ค้นหาชื่อ / อีเมล" style="width:180px"><select id="uRole"><option value="">ทุกบทบาท</option>${order.map(k=>`<option value="${k}" ${k===uRole?'selected':''}>${esc(rm[k].l)}</option>`).join('')}</select><button class="btn primary" data-uopen="new" ${ro}>+ เพิ่มผู้ใช้${uKind==='external'?'ภายนอก':'ภายใน'}</button></div></div>
+  <div class="card"><div class="card-head"><h2>${uKind==='external'?'ผู้ใช้ภายนอก':'ผู้ใช้ภายใน'}</h2><div class="row"><input type="text" id="uQ" value="${esc(uQ)}" placeholder="ค้นหาชื่อ / Username / แผนก / อีเมล" style="width:230px"><select id="uRole"><option value="">ทุกบทบาท</option>${order.map(k=>`<option value="${k}" ${k===uRole?'selected':''}>${esc(rm[k].l)}</option>`).join('')}</select><button class="btn primary" data-uopen="new" ${ro}>+ เพิ่มผู้ใช้${uKind==='external'?'ภายนอก':'ภายใน'}</button></div></div>
     ${f?userForm(f,ro):''}
-    <div class="tablewrap"><table><thead><tr><th>ชื่อ</th><th>ติดต่อ</th><th>บทบาท</th><th>สิทธิ์</th><th>โครงการที่เข้าถึง</th><th>ทีมช่าง</th><th>บัญชีระบบ</th><th>สถานะ</th><th>ใช้งานล่าสุด</th><th></th></tr></thead><tbody>
-    ${list.length?list.map(u=>{const ks=userKeys(u),g=(u.grant||[]).length,dn=(u.deny||[]).length;return `<tr class="${u.active===false?'dim':''}"><td><strong>${esc(u.name)}</strong>${u.title?`<span class="sub2">${esc(u.title)}</span>`:''}${uKindOf(u)==='external'?`<span class="sub2"><span class="pill warn">ภายนอก</span> ${esc(u.company||'')}${u.extType?' · '+esc(u.extType):''}</span>`:''}</td><td>${esc(u.email||'')}${u.phone?`<span class="sub2">${esc(u.phone)}</span>`:''}</td>
+    <div class="tablewrap"><table><thead><tr><th>ชื่อ / แผนก</th><th>Username</th><th>ติดต่อ</th><th>การยืนยันตัวตน</th><th>บทบาท</th><th>สิทธิ์</th><th>โครงการที่เข้าถึง</th><th>ทีมช่าง</th><th>สถานะ</th><th>เข้าใช้ล่าสุด</th><th></th></tr></thead><tbody>
+    ${list.length?list.map(u=>{const ks=userKeys(u),g=(u.grant||[]).length,dn=(u.deny||[]).length,ad=isAdAuth(u),locked=Boolean(u.is_status_locked),isMe=curUserId&&u.id===curUserId,seen=u.last_login_at||u.lastSeen;return `<tr class="${u.active===false?'dim':''}"><td><strong>${esc(u.name)}</strong>${isMe?' <span class="pill acc">บัญชีของคุณ</span>':''}${u.title||u.department?`<span class="sub2">${esc(u.title||'')}${u.title&&u.department?' · ':''}${u.department?`🏢 ${esc(u.department)}`:''}</span>`:''}${uKindOf(u)==='external'?`<span class="sub2"><span class="pill warn">ภายนอก</span> ${esc(u.company||'')}${u.extType?' · '+esc(u.extType):''}</span>`:''}</td><td class="mono">${esc(u.username||u.uid||u.id)}</td><td>${esc(u.email||'')}${u.phone?`<span class="sub2">${esc(u.phone)}</span>`:''}</td>
+      <td>${ad?'<span class="pill acc">🔐 AD / SSO</span>':`<span class="pill">🔑 Local</span><span class="sub2">${u.has_password?'ตั้งรหัสแล้ว':'<span class="neg">ยังไม่ตั้งรหัส</span>'}${u.must_change_password?' · <span class="neg">รอเปลี่ยนรหัส</span>':''}</span>`}</td>
       <td><span class="pill ${u.role==='admin'?'acc':u.role==='contractor'?'warn':''}">${esc(roleLabel(u.role))}</span></td>
       <td class="num">${ks.size}/${PKEYS.length}${g||dn?`<span class="sub2">${g?`<span class="pos">+${g}</span> `:''}${dn?`<span class="neg">−${dn}</span>`:''} จากบทบาท</span>`:''}</td>
       <td class="wrapcell">${u.projects==='all'||!Array.isArray(u.projects)?'<span class="hint">ทุกโครงการ</span>':u.projects.length?u.projects.map(p=>`<span class="pill mono">${esc(p)}</span>`).join(' '):'<span class="neg">ยังไม่กำหนด</span>'}</td>
-      <td>${u.team?tchip(u.team):'<span class="hint">–</span>'}</td><td>${u.uid?`<span class="pill good" title="${esc(u.uid)}">ผูกแล้ว</span>`:'<span class="hint">ยังไม่ผูก</span>'}</td>
-      <td>${u.active===false?'<span class="pill bad">ระงับ</span>':'<span class="pill good">ใช้งาน</span>'}</td><td>${u.lastSeen?thDate(u.lastSeen):'<span class="hint">–</span>'}</td>
-      <td class="row" style="flex-wrap:nowrap">${canWrite?`<button class="btn sm" data-uopen="${esc(u.id)}">แก้ไข</button><button class="btn sm" data-uact="${esc(u.id)}">${u.active===false?'เปิดใช้':'ระงับ'}</button>`:''}${u.id!==realUser()?.id&&u.active!==false?`<button class="btn sm" data-uas="${esc(u.id)}">ดูในฐานะ</button>`:''}</td></tr>`;}).join(''):'<tr><td colspan="10" class="empty">ไม่พบผู้ใช้งาน</td></tr>'}
+      <td>${u.team?tchip(u.team):'<span class="hint">–</span>'}</td>
+      <td>${u.active===false?'<span class="pill bad">ระงับ</span>':'<span class="pill good">เปิดใช้</span>'}${u.status_origin||locked?`<span class="sub2 mono">${esc(u.status_origin||'LOCAL')}${locked?' · 🔒 ล็อกโดย CIAM':''}</span>`:''}</td><td>${seen?thDate(String(seen).slice(0,10)):`<span class="hint">–</span>`}</td>
+      <td class="row" style="flex-wrap:nowrap">${canWrite?`<button class="btn sm" data-uopen="${esc(u.id)}">แก้ไข</button><button class="btn sm" data-uact="${esc(u.id)}" ${(locked||u.id==='U01')?`disabled title="${locked?'ถูกล็อกสถานะโดย Central IAM (CIAM)':'ไม่สามารถระงับผู้ดูแลระบบหลักได้'}"`:''}>${u.active===false?'เปิดใช้':'ระงับ'}</button>`:''}${u.id!==curUserId&&u.active!==false?`<button class="btn sm" data-uas="${esc(u.id)}">ดูในฐานะ</button>`:''}</td></tr>`;}).join(''):'<tr><td colspan="11" class="empty">ไม่พบผู้ใช้งาน</td></tr>'}
     </tbody></table></div>
-    ${!us.length?'<p class="hint" style="margin:8px 0 0">ยังไม่มีผู้ใช้งานในระบบ ทุกคนที่เปิดได้จะมีสิทธิ์ผู้ดูแลระบบ เพิ่มผู้ใช้คนแรกเป็นผู้ดูแลระบบแล้วกด “ผูกกับบัญชีของฉัน” ก่อน</p>':''}</div>`;
+    ${!us.length?'<p class="hint" style="margin:8px 0 0">ยังไม่มีผู้ใช้งานในระบบ ทุกคนที่เปิดได้จะมีสิทธิ์ผู้ดูแลระบบ กรุณาเพิ่มผู้ดูแลระบบคนแรก</p>':''}</div>`;
 }
 function userForm(f,ro){
+  const isNew=!f.id,isExt=uKindOf(f)==='external',useAd=f.use_ad_auth!==undefined?Boolean(f.use_ad_auth):(!isExt&&f.id!=='U01'),isLocked=Boolean(f.is_status_locked);
   const all=f.projects==='all'||!Array.isArray(f.projects),sel=new Set(all?[]:f.projects),rm=roleMap(),rk=roleKeys(f.role),gr=new Set(f.grant||[]),dn=new Set(f.deny||[]);
-  return `<form class="fform" id="uForm" data-uid="${esc(f.id||'')}" style="margin-bottom:12px"><strong>${f.id?'แก้ไขผู้ใช้งาน':'เพิ่มผู้ใช้งาน'}</strong><div class="form-grid" style="margin-top:8px">
+  return `<form class="fform" id="uForm" data-uid="${esc(f.id||'')}" style="margin-bottom:12px"><strong>${f.id?'แก้ไขผู้ใช้งาน':'เพิ่มผู้ใช้งาน'}</strong>
+  ${isLocked?`<div style="background:rgba(245,158,11,0.14);border:1px solid rgba(245,158,11,0.45);color:#b45309;padding:8px 10px;border-radius:8px;font-size:12px;margin:8px 0">🔒 บัญชีนี้ถูกจัดการและล็อกสถานะโดย Central IAM (CIAM) (${esc(f.status_origin||'CIAM')}) — ไม่สามารถเปิด/ระงับจากฝั่ง Spoke ได้</div>`:''}
+  <div class="form-grid" style="margin-top:8px">
     <label>ชื่อ-นามสกุล *<input type="text" name="name" value="${esc(f.name||'')}" required ${ro}></label>
+    <label>Username (สำหรับ Login / AD) *<input type="text" name="username" value="${esc(f.username||(!isNew&&f.uid?f.uid:''))}" required placeholder="เช่น somchai.p หรือ contractor01" ${ro}></label>
     <label>ตำแหน่ง<input type="text" name="title" value="${esc(f.title||'')}" ${ro}></label>
+    <label>แผนก / ฝ่าย (Department)<input type="text" name="department" value="${esc(f.department||'')}" placeholder="เช่น ติดตั้ง / QC / บริหารโครงการ" ${ro}></label>
     <label>อีเมล<input type="email" name="email" value="${esc(f.email||'')}" ${ro}></label>
     <label>โทรศัพท์<input type="text" name="phone" value="${esc(f.phone||'')}" ${ro}></label>
-    <label>ประเภทผู้ใช้<select name="kind" data-ukindsel ${ro}><option value="internal" ${uKindOf(f)==='internal'?'selected':''}>ภายใน (พนักงานบริษัท)</option><option value="external" ${uKindOf(f)==='external'?'selected':''}>ภายนอก</option></select></label>
-    <label data-uext ${uKindOf(f)==='external'?'':'hidden'}>บริษัท / หน่วยงาน *<input type="text" name="company" value="${esc(f.company||'')}" ${ro}></label>
-    <label data-uext ${uKindOf(f)==='external'?'':'hidden'}>ประเภทภายนอก<select name="extType" ${ro}>${EXT_TYPES.map(x=>`<option ${x===f.extType?'selected':''}>${x}</option>`).join('')}</select></label>
-    <label>บทบาท *<select name="role" data-urole ${ro}>${Object.entries(rm).filter(([k,r])=>uKindOf(f)==='external'?(EXT_ROLES.includes(k)||!r.builtin):!['contractor','customer'].includes(k)).map(([k,r])=>`<option value="${k}" ${f.role===k?'selected':''}>${esc(r.l)}</option>`).join('')}</select></label>
+    <label>ประเภทผู้ใช้<select name="kind" data-ukindsel ${ro}><option value="internal" ${!isExt?'selected':''}>ภายใน (พนักงานบริษัท)</option><option value="external" ${isExt?'selected':''}>ภายนอก</option></select></label>
+    <label>รูปแบบการยืนยันตัวตน (Auth)<select name="use_ad_auth" data-uauthsel ${ro}><option value="true" ${useAd?'selected':''}>🔐 Window Asia AD / Central IAM SSO</option><option value="false" ${!useAd?'selected':''}>🔑 Local Password (ผู้รับเหมา / ลูกค้า / Break-Glass)</option></select></label>
+    <label data-uext ${isExt?'':'hidden'}>บริษัท / หน่วยงาน *<input type="text" name="company" value="${esc(f.company||'')}" ${ro}></label>
+    <label data-uext ${isExt?'':'hidden'}>ประเภทภายนอก<select name="extType" ${ro}>${EXT_TYPES.map(x=>`<option ${x===f.extType?'selected':''}>${x}</option>`).join('')}</select></label>
+    <label>บทบาท *<select name="role" data-urole ${ro}>${Object.entries(rm).filter(([k,r])=>isExt?(EXT_ROLES.includes(k)||!r.builtin):!['contractor','customer'].includes(k)).map(([k,r])=>`<option value="${k}" ${f.role===k?'selected':''}>${esc(r.l)}</option>`).join('')}</select></label>
     <label data-uteam ${f.role==='contractor'?'':'hidden'}>ทีมช่างที่ผูก *<select name="team" ${ro}><option value="">เลือกทีม</option>${state.teams.filter(t=>isCon(t.name)).map(t=>`<option ${t.name===f.team?'selected':''}>${esc(t.name)}</option>`).join('')}</select></label>
+    <div class="fform" id="uLocalPwdBox" style="grid-column:1/-1;background:rgba(148,163,184,0.08);margin:0" ${useAd?'hidden':''}>
+      <div class="form-grid" style="margin:0">
+        <label>รหัสผ่าน Local ${!isNew&&f.has_password?'(เว้นว่างไว้หากไม่เปลี่ยน)':'* (8-16 ตัวอักษร A-Z, a-z, 0-9, อักขระพิเศษ)'}
+          <input type="password" name="password" maxlength="16" autocomplete="new-password" placeholder="${!isNew&&f.has_password?'••••••• (เว้นว่างไว้หากใช้รหัสเดิม)':'กำหนดรหัสผ่านเริ่มต้น 8-16 ตัวอักษร'}" ${ro}>
+        </label>
+        <label class="row" style="gap:6px;align-self:end;padding-bottom:6px">
+          <input type="checkbox" name="must_change_password" ${isNew?'checked':(f.must_change_password?'checked':'')} ${ro}>
+          <span>บังคับเปลี่ยนรหัสผ่านเมื่อเข้าสู่ระบบครั้งถัดไป</span>
+        </label>
+      </div>
+    </div>
     <div class="fld" style="grid-column:1/-1"><span>โครงการที่เข้าถึง</span><label class="row" style="gap:6px"><input type="checkbox" name="all" ${all?'checked':''} data-uall ${ro}>ทุกโครงการ (รวมโครงการใหม่ในอนาคต)</label>
       <div class="ups" data-ups ${all?'hidden':''}>${allProjectsRaw().map(p=>`<label class="pick ${sel.has(p)?'on':''}"><input type="checkbox" name="p" value="${esc(p)}" ${sel.has(p)?'checked':''} ${ro}><span class="mono">${esc(p)}</span><span class="hint">${esc(projName(p))}</span></label>`).join('')}</div></div>
-    <label class="row" style="gap:6px"><input type="checkbox" name="active" ${f.active!==false?'checked':''} ${ro}>เปิดใช้งาน</label>
-    ${!DEMO&&me?`<label class="row" style="gap:6px"><input type="checkbox" name="mine" ${f.uid&&f.uid===me?'checked':''} ${ro}>ผูกกับบัญชีของฉัน (ผู้ที่กำลังใช้งานอยู่)</label>`:''}
+    <label class="row" style="gap:6px"><input type="checkbox" name="active" ${f.active!==false?'checked':''} ${isLocked||f.id==='U01'?'disabled':ro}>เปิดใช้งาน${isLocked?' <span class="sub2">(ล็อกโดย CIAM)</span>':f.id==='U01'?' <span class="sub2">(ผู้ดูแลระบบหลัก)</span>':''}</label>
   </div>
   <details class="uov" ${gr.size||dn.size?'open':''}><summary><strong>สิทธิ์รายบุคคล</strong> <span class="hint">ปรับเพิ่มหรือตัดจากบทบาท “${esc(roleLabel(f.role))}” · ${gr.size?`+${gr.size} `:''}${dn.size?`−${dn.size}`:''}</span></summary>
     <div class="uovg">${PG.map(([g,items])=>`<div class="uovc"><b>${esc(g)}</b>${items.map(([k,l])=>{const v=gr.has(k)?'grant':dn.has(k)?'deny':'';return `<label class="uovr ${v}"><span>${esc(l)}</span><select name="ov:${k}" ${f.role==='admin'?'disabled':ro}><option value="">ตามบทบาท (${rk.has(k)?'✓ มี':'– ไม่มี'})</option><option value="grant" ${v==='grant'?'selected':''}>อนุญาตเพิ่ม</option><option value="deny" ${v==='deny'?'selected':''}>ไม่อนุญาต</option></select></label>`;}).join('')}</div>`).join('')}</div>
@@ -4209,17 +4228,32 @@ function userForm(f,ro){
   <div class="row" style="margin-top:8px"><button class="btn primary" ${ro}>บันทึก</button><button type="button" class="btn" data-uclose>ยกเลิก</button></div></form>`;
 }
 async function saveUser(form){
-  const d=new FormData(form),id=form.dataset.uid,name=(d.get('name')||'').trim(),role=d.get('role'),kind=d.get('kind')||'internal';if(!name){toast('ใส่ชื่อ');return;}
+  const d=new FormData(form),id=form.dataset.uid,name=(d.get('name')||'').trim(),username=(d.get('username')||'').trim(),department=(d.get('department')||'').trim(),role=d.get('role'),kind=d.get('kind')||'internal';
+  if(!name){toast('ใส่ชื่อ');return;}
+  if(!username){toast('กรุณาระบุ Username สำหรับเข้าสู่ระบบ');return;}
+  if((state.users||[]).some(u=>u.id!==id&&String(u.username||'').trim().toLowerCase()===username.toLowerCase())){toast(`Username "${username}" ถูกใช้งานโดยบัญชีอื่นแล้ว`);return;}
   if(kind==='external'&&!(d.get('company')||'').trim()){toast('ผู้ใช้ภายนอกต้องระบุบริษัท / หน่วยงาน');return;}
   if(kind==='external'&&role==='admin'){toast('ผู้ใช้ภายนอกเป็นผู้ดูแลระบบไม่ได้');return;}
   if(kind==='external'&&d.get('all')){toast('ผู้ใช้ภายนอกต้องเลือกโครงการที่เข้าถึงเฉพาะโครงการ');return;}
   if(role==='contractor'&&!d.get('team')){toast('ผู้รับเหมาต้องผูกกับทีมช่าง');return;}
   const projects=d.get('all')?'all':d.getAll('p');if(projects!=='all'&&!projects.length&&role!=='admin'){toast('เลือกโครงการที่เข้าถึงอย่างน้อย 1 โครงการ');return;}
   const old=id?state.users.find(u=>u.id===id):null;
-  if(old&&old.role==='admin'&&(role!=='admin'||!d.get('active'))&&state.users.filter(u=>u.role==='admin'&&u.active!==false).length<=1){toast('ต้องมีผู้ดูแลระบบอย่างน้อย 1 คน');return;}
+  const active=(old&&(old.is_status_locked||id==='U01'))?(old.active!==false):!!d.get('active');
+  if(old&&old.role==='admin'&&(role!=='admin'||!active)&&state.users.filter(u=>u.role==='admin'&&u.active!==false).length<=1){toast('ต้องมีผู้ดูแลระบบอย่างน้อย 1 คน');return;}
+  const use_ad_auth=d.get('use_ad_auth')==='true';
+  let rawPwd='';
+  if(!use_ad_auth){
+    rawPwd=(d.get('password')||'').trim();
+    if((!id||!old?.has_password)&&!rawPwd){toast('กรุณากำหนดรหัสผ่านเริ่มต้นสำหรับบัญชี Local');return;}
+    if(rawPwd){
+      if(rawPwd.length<8||rawPwd.length>16){toast('รหัสผ่านต้องมีความยาว 8 ถึง 16 ตัวอักษร');return;}
+      if(!/[A-Z]/.test(rawPwd)||!/[a-z]/.test(rawPwd)||!/[0-9]/.test(rawPwd)||!/[!@#$%^&*()_+\-=\[\]{}|;:,.<>?/~`]/.test(rawPwd)){toast('รหัสผ่านต้องมีพิมพ์ใหญ่ พิมพ์เล็ก ตัวเลข และอักขระพิเศษอย่างน้อยอย่างละ 1 ตัว');return;}
+      if(username.length>=3&&rawPwd.toLowerCase().includes(username.toLowerCase())){toast('ห้ามใช้ Username เป็นส่วนหนึ่งของรหัสผ่าน');return;}
+    }
+  }
   const grant=[],deny=[];if(role!=='admin')PKEYS.forEach(k=>{const v=d.get('ov:'+k);const rk=roleKeys(role);if(v==='grant'&&!rk.has(k))grant.push(k);if(v==='deny'&&rk.has(k))deny.push(k);});
   if(id&&old?.uid&&old.uid===realUser()?.uid&&role!=='admin'&&old.role==='admin'){toast('ไม่สามารถลดสิทธิ์ผู้ดูแลระบบของตัวเองได้');return;}
-  const body={kind,company:kind==='external'?(d.get('company')||'').trim():'',extType:kind==='external'?d.get('extType'):'',name,title:(d.get('title')||'').trim(),email:(d.get('email')||'').trim(),phone:(d.get('phone')||'').trim(),role,team:role==='contractor'?d.get('team'):'',projects:role==='admin'?'all':projects,active:!!d.get('active'),grant,deny,...(d.get('mine')?{uid:me}:old?.uid&&old.uid===me&&!d.get('mine')?{uid:''}:{}),...stamp()};
+  const body={kind,company:kind==='external'?(d.get('company')||'').trim():'',extType:kind==='external'?d.get('extType'):'',name,username,uid:old?.uid||username,department,title:(d.get('title')||'').trim(),email:(d.get('email')||'').trim(),phone:(d.get('phone')||'').trim(),role,team:role==='contractor'?d.get('team'):'',projects:role==='admin'?'all':projects,active,use_ad_auth,must_change_password:!use_ad_auth?!!d.get('must_change_password'):false,...(!use_ad_auth&&rawPwd?{password:rawPwd}:{}),grant,deny,...stamp()};
   const ok=await write(()=>id?db.doc('users/'+id).update(body):db.collection('users').add({...body,createdAt:new Date().toISOString()}),id?'บันทึกผู้ใช้งานแล้ว':'เพิ่มผู้ใช้งานแล้ว');if(ok){uForm=null;renderUsers();}
 }
 function rolesHtml(){
@@ -4240,7 +4274,10 @@ function rolesHtml(){
     if(b=g('[data-uopen]')){if(b.disabled)return;uForm=uForm===b.dataset.uopen?null:b.dataset.uopen;renderUsers();return;}
     if(b=g('[data-uclose]')){uForm=null;renderUsers();return;}
     if(b=g('[data-uas]')){actAs=b.dataset.uas;try{sessionStorage.setItem('actAs',actAs);}catch(_){}if(state.proj&&!projOk(state.proj))state.proj='';renderAll();return;}
-    if(b=g('[data-uact]')){if(!needPerm('users'))return;const u=state.users.find(x=>x.id===b.dataset.uact);if(!u)return;if(u.active!==false&&u.role==='admin'&&state.users.filter(x=>x.role==='admin'&&x.active!==false).length<=1){toast('ต้องมีผู้ดูแลระบบอย่างน้อย 1 คน');return;}
+    if(b=g('[data-uact]')){if(b.disabled||!needPerm('users'))return;const u=state.users.find(x=>x.id===b.dataset.uact);if(!u)return;
+      if(u.id==='U01'){toast('ไม่สามารถระงับบัญชีผู้ดูแลระบบหลัก (U01) ได้');return;}
+      if(u.is_status_locked){toast('บัญชีนี้ถูกล็อกสถานะโดย Central IAM (CIAM) ไม่สามารถเปลี่ยนสถานะจากฝั่ง Spoke ได้');return;}
+      if(u.active!==false&&u.role==='admin'&&state.users.filter(x=>x.role==='admin'&&x.active!==false).length<=1){toast('ต้องมีผู้ดูแลระบบอย่างน้อย 1 คน');return;}
       await write(()=>db.doc('users/'+u.id).update({active:u.active===false,...stamp()}),u.active===false?'เปิดใช้งานแล้ว':'ระงับผู้ใช้งานแล้ว');renderUsers();return;}
     if(b=g('[data-rnew]')){rNew=true;renderUsers();return;}
     if(b=g('[data-rnewx]')){rNew=false;renderUsers();return;}
@@ -4252,8 +4289,9 @@ function rolesHtml(){
   el.addEventListener('change',e=>{const t=e.target;
     if(t.id==='uRole'){uRole=t.value;renderUsers();}
     else if(t.matches('[data-rk]')){const [r,k]=t.dataset.rk.split('|');t.checked?rDraft[r].add(k):rDraft[r].delete(k);renderUsers();}
+    else if(t.matches('[data-uauthsel]')){const box=t.form?.querySelector('#uLocalPwdBox');if(box)box.hidden=(t.value==='true');}
     else if(t.matches('[data-urole]')){const f=t.form;f.querySelector('[data-uteam]').hidden=t.value!=='contractor';const rk=roleKeys(t.value);f.querySelectorAll('select[name^="ov:"]').forEach(s=>{const k=s.name.slice(3);s.options[0].textContent=`ตามบทบาท (${rk.has(k)?'✓ มี':'– ไม่มี'})`;s.disabled=t.value==='admin';});}
-    else if(t.matches('[data-ukindsel]')){const f=t.form,ex=t.value==='external';f.querySelectorAll('[data-uext]').forEach(x=>x.hidden=!ex);const rs=f.querySelector('[data-urole]'),rm=roleMap();rs.innerHTML=Object.entries(rm).filter(([k,r])=>ex?(EXT_ROLES.includes(k)||!r.builtin):!['contractor','customer'].includes(k)).map(([k,r])=>`<option value="${k}">${esc(r.l)}</option>`).join('');rs.dispatchEvent(new Event('change',{bubbles:true}));if(ex){const a=f.querySelector('[data-uall]');a.checked=false;f.querySelector('[data-ups]').hidden=false;}}
+    else if(t.matches('[data-ukindsel]')){const f=t.form,ex=t.value==='external';f.querySelectorAll('[data-uext]').forEach(x=>x.hidden=!ex);const rs=f.querySelector('[data-urole]'),rm=roleMap();rs.innerHTML=Object.entries(rm).filter(([k,r])=>ex?(EXT_ROLES.includes(k)||!r.builtin):!['contractor','customer'].includes(k)).map(([k,r])=>`<option value="${k}">${esc(r.l)}</option>`).join('');rs.dispatchEvent(new Event('change',{bubbles:true}));const authSel=f.querySelector('[data-uauthsel]');if(authSel){authSel.value=ex?'false':'true';authSel.dispatchEvent(new Event('change',{bubbles:true}));}if(ex){const a=f.querySelector('[data-uall]');a.checked=false;f.querySelector('[data-ups]').hidden=false;}}
     else if(t.matches('select[name^="ov:"]')){t.closest('.uovr').className='uovr '+t.value;}
     else if(t.matches('[data-uall]')){t.form.querySelector('[data-ups]').hidden=t.checked;}
     else if(t.name==='p'){t.closest('.pick').classList.toggle('on',t.checked);}});
@@ -5395,11 +5433,13 @@ function demoData(){
     Object.values(g).forEach(list=>{const p=list[0].project,n=(cnt[p]=(cnt[p]||0)+1),id=`HO-${p}-${pad3(n)}`,date=list.map(o=>(o.history||[]).find(h=>h.stage===7)?.at||t).sort()[0],r=RCV[p]||['ตัวแทนลูกค้า',''];
       handovers.push({id,project:p,no:id,date,receiver:r[0],pos:r[1],deliverer:'คุณวีระ (ผจก.โครงการ)',note:'',openings:list.map(o=>o.code),file:n%3===0?null:{name:`${id}_ลงนาม.pdf`,type:'application/pdf',src:'data:application/pdf;base64,JVBERi0xLjEKJcK1wrYKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+ZW5kb2JqIDIgMCBvYmo8PC9UeXBlL1BhZ2VzL0tpZHNbXS9Db3VudCAwPj5lbmRvYmoKdHJhaWxlcjw8L1Jvb3QgMSAwIFI+Pg=='}});
       list.forEach(o=>{o.ho=id;});});}
+  const DEMO_UNAME={U01:'admin',U02:'prasert.exec',U03:'weera.pm',U04:'somying.qc',U05:'wichai.fm',U06:'orathai.ac',U07:'surachet.con',U08:'kamon.vw'};
+  const DEMO_DEPT={U01:'IT Security',U02:'ผู้บริหาร',U03:'บริหารโครงการ',U04:'QC / วิศวกรรม',U05:'ควบคุมงานติดตั้ง',U06:'บัญชีและการเงิน',U07:'ทีมช่าง ส.เจริญการช่าง',U08:'ฝ่ายขาย'};
   const users=[['U01','คุณปฏินันท์','ผู้ดูแลระบบ','admin','all','',true,0],['U02','คุณประเสริฐ','กรรมการผู้จัดการ','exec','all','',true,1],['U03','คุณวีระ','ผู้จัดการโครงการ','pm',['P2610','P2612','P2598'],'',true,0],['U04','คุณสมหญิง','วิศวกร QC','qc','all','',true,2],['U05','คุณวิชัย','โฟร์แมน','foreman',['P2610'],'',true,0,['qc'],['ncr']],['U06','คุณอรทัย','บัญชี','acct','all','',true,1],['U07','คุณสุรเชษฐ์','หัวหน้าทีม ส.เจริญการช่าง','contractor',['P2610','P2612','P2615','P2598'],'ส.เจริญการช่าง',true,3],['U08','คุณกมล','ฝ่ายขาย (ดูอย่างเดียว)','viewer',['P2605','P2610'],'',false,40]]
-    .map(([id,name,title,role,projects,team,active,ago,grant=[],deny=[]])=>({id,name,title,role,projects,team,active,grant,deny,email:`${id.toLowerCase()}@windowasia.co.th`,phone:'08'+id.slice(1).padStart(8,'1'),lastSeen:addDays(t,-ago)+'T09:00:00',createdAt:'2026-04-01'}));
+    .map(([id,name,title,role,projects,team,active,ago,grant=[],deny=[]])=>({id,username:DEMO_UNAME[id]||id.toLowerCase(),department:DEMO_DEPT[id]||'',name,title,role,projects,team,active,grant,deny,email:`${id.toLowerCase()}@windowasia.co.th`,phone:'08'+id.slice(1).padStart(8,'1'),use_ad_auth:!['contractor','customer'].includes(role)&&id!=='U01',status_origin:'LOCAL',lastSeen:addDays(t,-ago)+'T09:00:00',createdAt:'2026-04-01'}));
   users.forEach(u=>{u.kind=['contractor','customer'].includes(u.role)?'external':'internal';if(u.role==='contractor'){u.company='ส.เจริญการช่าง';u.extType='ผู้รับเหมาช่วง';}});
-  users.push({id:'U09',name:'คุณธนพล แก้วมณี',title:'ตัวแทนเจ้าของโครงการ',role:'customer',kind:'external',company:'บจ. ริเวอร์วิว พร็อพเพอร์ตี้',extType:'ลูกค้า / เจ้าของโครงการ',projects:['P2610'],team:'',active:true,grant:[],deny:[],email:'thanapol@riverview.co.th',phone:'0891234567',lastSeen:addDays(t,-2)+'T10:00:00',createdAt:'2026-05-01'},
-    {id:'U10',name:'คุณมานพ',title:'ประมาณราคา',role:'sales',kind:'internal',projects:'all',team:'',active:true,grant:[],deny:[],email:'u10@windowasia.co.th',phone:'0811111110',lastSeen:addDays(t,0)+'T08:30:00',createdAt:'2026-04-01'});
+  users.push({id:'U09',username:'thanapol.rv',department:'เจ้าของโครงการ',name:'คุณธนพล แก้วมณี',title:'ตัวแทนเจ้าของโครงการ',role:'customer',kind:'external',company:'บจ. ริเวอร์วิว พร็อพเพอร์ตี้',extType:'ลูกค้า / เจ้าของโครงการ',projects:['P2610'],team:'',active:true,use_ad_auth:false,status_origin:'LOCAL',grant:[],deny:[],email:'thanapol@riverview.co.th',phone:'0891234567',lastSeen:addDays(t,-2)+'T10:00:00',createdAt:'2026-05-01'},
+    {id:'U10',username:'manop.sl',department:'ประมาณราคา / ขาย',name:'คุณมานพ',title:'ประมาณราคา',role:'sales',kind:'internal',projects:'all',team:'',active:true,use_ad_auth:true,status_origin:'LOCAL',grant:[],deny:[],email:'u10@windowasia.co.th',phone:'0811111110',lastSeen:addDays(t,0)+'T08:30:00',createdAt:'2026-04-01'});
   // timesheets for internal crews (last ~3 weeks)
   const timesheets=[];{const R={lead:125,tech:95,gen:75,help:62},T=teams.reduce((a,x)=>(a[x.name]=x,a),{});
     const add=(p,tm,d,note,ot=0)=>{const ms=(T[tm].members||[]);const rows=ms.filter((m,i)=>(d.charCodeAt(9)+i)%5!==0).map((m,i)=>({mid:m.id,name:m.name,pos:m.pos,rate:m.rate??R[m.pos],h:8,ot:i<2?ot:0}));timesheets.push({project:p,team:tm,date:d,note,rows,total:rows.reduce((a,r)=>a+r.h*r.rate+r.ot*r.rate*1.5,0)});};

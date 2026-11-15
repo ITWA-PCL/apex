@@ -7,7 +7,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const db = require('../db/postgres');
-const { ssoSessions, parseCookies } = require('./rbac');
+const { ssoSessions, parseCookies, revokeUserSessions, ROLE_DEF } = require('./rbac');
 const { createAuthRateLimiter } = require('./headers');
 
 const router = express.Router();
@@ -124,6 +124,41 @@ function maskSecret(val) {
   return val.slice(0, 3) + '••••••••' + val.slice(-3);
 }
 
+function isHttpsRequest(req) {
+  const proto = String(req?.headers?.['x-forwarded-proto'] || '').toLowerCase();
+  return Boolean(req?.secure || proto.split(',')[0].trim() === 'https');
+}
+
+function buildSessionCookie(req, sessionId, maxAgeSeconds = 28800) {
+  const secureFlag = isHttpsRequest(req) ? '; Secure' : '';
+  return `apex_session=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secureFlag}`;
+}
+
+function resolveRoleKeyFromCiam(roleInput, groupNameInput, fallbackRole = 'viewer') {
+  const candidates = [roleInput, groupNameInput].filter(Boolean).map(v => String(v).trim());
+  for (const raw of candidates) {
+    const lower = raw.toLowerCase();
+    if (ROLE_DEF[lower]) return lower;
+    if (['super_admin', 'superadmin', 'system admin', 'administrator'].includes(lower)) return 'admin';
+    for (const [k, def] of Object.entries(ROLE_DEF)) {
+      if (String(def.l || '').toLowerCase() === lower) return k;
+    }
+  }
+  return ROLE_DEF[fallbackRole] ? fallbackRole : 'viewer';
+}
+
+function findUserFlexible(users = [], identifier = '') {
+  const key = String(identifier || '').trim().toLowerCase();
+  if (!key) return null;
+  return (
+    users.find(u =>
+      [u.id, u.uid, u.username, u.external_id, u.email]
+        .filter(Boolean)
+        .some(v => String(v).trim().toLowerCase() === key)
+    ) || null
+  );
+}
+
 // ============================================================================
 // GROUP A: Admin Settings API (Zero .env Dependency -> PostgreSQL system_settings)
 // ============================================================================
@@ -148,6 +183,8 @@ router.get('/api/settings/ciam-sso', async (req, res) => {
       has_management_api_key: Boolean(s.ciam_management_api_key),
       ciam_allowed_ips: s.ciam_allowed_ips,
       ciam_portal_url: s.ciam_portal_url || 'https://ciam.windowasia.com/portal',
+      ciam_auto_provision_group: s.ciam_auto_provision_group || 'viewer',
+      ciam_session_ttl_minutes: Number(s.ciam_session_ttl_minutes) || 480,
       break_glass_enabled: s.break_glass_enabled === 'true',
       break_glass_url: s.break_glass_url || 'http://172.18.0.1:3100',
       ai_copilot_enabled: s.ai_copilot_enabled === 'true',
@@ -181,12 +218,19 @@ async function handleUpdateCiamSettings(req, res) {
       'ciam_post_logout_redirect_uri',
       'ciam_allowed_ips',
       'ciam_portal_url',
+      'ciam_auto_provision_group',
       'break_glass_url',
       'ai_provider_url',
       'ai_model_name'
     ];
     for (const f of stringFields) {
       if (body[f] !== undefined) updates[f] = String(body[f]).trim();
+    }
+    if (body.ciam_session_ttl_minutes !== undefined) {
+      const ttl = parseInt(body.ciam_session_ttl_minutes, 10);
+      if (Number.isFinite(ttl) && ttl >= 5 && ttl <= 10080) {
+        updates.ciam_session_ttl_minutes = String(ttl);
+      }
     }
     if (body.ciam_enabled !== undefined) updates.ciam_enabled = String(Boolean(body.ciam_enabled));
     if (body.break_glass_enabled !== undefined) updates.break_glass_enabled = String(Boolean(body.break_glass_enabled));
@@ -310,7 +354,10 @@ router.get('/api/auth/sso/config', async (req, res) => {
       break_glass_active: breakGlassActive,
       break_glass_enabled: breakGlassActive,
       issuer_url: s.ciam_issuer_url || 'https://ciam.windowasia.com',
-      client_id: s.ciam_client_id || 'apex-spoke-client'
+      ciam_base_url: s.ciam_issuer_url || 'https://ciam.windowasia.com',
+      client_id: s.ciam_client_id || 'apex-spoke-client',
+      login_button_label: 'เข้าสู่ระบบด้วย Window Asia SSO',
+      fallback_ad_available: true
     });
   } catch (err) {
     res.status(500).json({ error: 'sso_config_error', message: err.message });
@@ -377,12 +424,7 @@ router.post('/api/auth/login', authRateLimiter, async (req, res) => {
       });
     }
 
-    let userRecord = users.find(
-      u =>
-        String(u.id || '').toLowerCase() === cleanId ||
-        String(u.uid || '').toLowerCase() === cleanId ||
-        String(u.email || '').toLowerCase() === cleanId
-    );
+    let userRecord = findUserFlexible(users, cleanId);
 
     if (!userRecord && (cleanId === 'admin' || cleanId === 'u01@windowasia.co.th')) {
       userRecord = users.find(u => u.id === 'U01') || null;
@@ -420,12 +462,40 @@ router.post('/api/auth/login', authRateLimiter, async (req, res) => {
       });
     }
 
+    const isAdUser = userRecord.use_ad_auth === true || (userRecord.use_ad_auth === undefined && userRecord.kind !== 'external');
+
     // Verify per-user password_hash (or primary admin U01's admin_password_hash ONLY — no shared fallback across users)
     let passwordValid = false;
+    let usedBreakGlassGateway = false;
     if (userRecord.password_hash) {
       passwordValid = db.verifyPassword(String(password), userRecord.password_hash);
     } else if (userRecord.id === 'U01' && s.admin_password_hash) {
       passwordValid = db.verifyPassword(String(password), s.admin_password_hash);
+    }
+
+    // Break-Glass Direct AD Gateway Fallback (Spec Section B.4 & Section 9)
+    if (!passwordValid && s.break_glass_enabled === 'true' && isAdUser) {
+      const gwBase = (s.break_glass_url || 'http://172.18.0.1:3100').replace(/\/+$/, '');
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 4000);
+      try {
+        const gwResp = await fetch(`${gwBase}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({
+            username: userRecord.username || userRecord.uid || cleanId,
+            password: String(password)
+          }),
+          signal: controller.signal
+        });
+        clearTimeout(timer);
+        if (gwResp.ok) {
+          passwordValid = true;
+          usedBreakGlassGateway = true;
+        }
+      } catch (_) {
+        clearTimeout(timer);
+      }
     }
 
     if (!passwordValid) {
@@ -447,7 +517,6 @@ router.post('/api/auth/login', authRateLimiter, async (req, res) => {
     // MANDATORY RULE: 90-Day Forced Password Rotation & Complexity (Spec v2.12.0 หมวด G)
     // Applies ONLY to Local Accounts (use_ad_auth === false or Local Admin login)!
     // MUST NEVER apply to AD Accounts (use_ad_auth === true)!
-    const isAdUser = userRecord.use_ad_auth === true || (userRecord.use_ad_auth === undefined && userRecord.kind !== 'external');
     let mustChangePassword = false;
     let passwordExpired = false;
     let daysLeft = 90;
@@ -463,34 +532,47 @@ router.post('/api/auth/login', authRateLimiter, async (req, res) => {
       passwordExpired = false;
     }
 
+    const nowIso = new Date().toISOString();
+    const ttlMinutes = Math.max(5, Number(s.ciam_session_ttl_minutes) || 480);
+    const maxAgeSeconds = ttlMinutes * 60;
     const sessionId = crypto.randomBytes(32).toString('hex');
-    ssoSessions.set(sessionId, {
+    const sessionPayload = {
       userId: userRecord.id,
       uid: userRecord.uid || userRecord.id,
+      username: userRecord.username || userRecord.uid || userRecord.id,
       email: userRecord.email || `${String(userRecord.id).toLowerCase()}@windowasia.co.th`,
-      authenticatedAt: new Date().toISOString(),
+      authMethod: usedBreakGlassGateway ? 'break_glass_ad' : 'local_credentials',
+      authenticatedAt: nowIso,
+      expiresAt: Date.now() + maxAgeSeconds * 1000,
       mustChangePassword
-    });
+    };
+    ssoSessions.set(sessionId, sessionPayload);
+    await db.saveSession(sessionId, sessionPayload);
+
+    await db.updateDoc(
+      'users',
+      userRecord.id,
+      { lastSeen: nowIso, last_login_at: nowIso },
+      userRecord.id
+    );
 
     await db.insertAuditLog({
-      eventCode: 'SSO-01',
+      eventCode: usedBreakGlassGateway ? 'BG-02' : 'SSO-01',
       actorId: userRecord.id,
       actorEmail: userRecord.email || cleanId,
       actorRole: userRecord.role,
       ipAddress: clientIp,
       targetResource: '/api/auth/login',
       details: {
-        auth_method: 'local_credentials',
+        auth_method: sessionPayload.authMethod,
         app_code: 'apex',
         is_ad_user: isAdUser,
-        must_change_password: mustChangePassword
+        must_change_password: mustChangePassword,
+        ...(usedBreakGlassGateway ? { gateway: s.break_glass_url || 'http://172.18.0.1:3100' } : {})
       }
     });
 
-    res.setHeader(
-      'Set-Cookie',
-      `apex_session=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800`
-    );
+    res.setHeader('Set-Cookie', buildSessionCookie(req, sessionId, maxAgeSeconds));
     res.json({
       status: 'ok',
       message: `เข้าสู่ระบบสำเร็จในชื่อ ${userRecord.name}`,
@@ -500,8 +582,10 @@ router.post('/api/auth/login', authRateLimiter, async (req, res) => {
       user: {
         id: userRecord.id,
         uid: userRecord.uid || userRecord.id,
+        username: userRecord.username || userRecord.uid || userRecord.id,
         name: userRecord.name,
         email: userRecord.email,
+        department: userRecord.department || userRecord.title || 'Operations',
         role: userRecord.role,
         use_ad_auth: isAdUser
       }
@@ -557,7 +641,12 @@ router.post('/api/auth/local/change-password', async (req, res) => {
     }
 
     // Complexity check: 8-16 chars, Uppercase, Lowercase, Digit, Special char, No username
-    const complexityErr = validatePasswordComplexity(String(new_password).trim(), userRecord.name || userRecord.id);
+    const userIdentity =
+      userRecord.username ||
+      userRecord.uid ||
+      (userRecord.email ? String(userRecord.email).split('@')[0] : '') ||
+      userRecord.id;
+    const complexityErr = validatePasswordComplexity(String(new_password).trim(), userIdentity);
     if (complexityErr) {
       return res.status(400).json({ error: 'complexity_violation', message: complexityErr });
     }
@@ -582,9 +671,13 @@ router.post('/api/auth/local/change-password', async (req, res) => {
 
     // Update active session flag
     const cookies = parseCookies(req.headers.cookie || '');
-    if (cookies.apex_session && ssoSessions.has(cookies.apex_session)) {
-      const sess = ssoSessions.get(cookies.apex_session);
-      sess.mustChangePassword = false;
+    if (cookies.apex_session) {
+      const sess = ssoSessions.get(cookies.apex_session) || (await db.getSession(cookies.apex_session));
+      if (sess) {
+        sess.mustChangePassword = false;
+        ssoSessions.set(cookies.apex_session, sess);
+        await db.saveSession(cookies.apex_session, sess);
+      }
     }
 
     await db.insertAuditLog({
@@ -609,21 +702,25 @@ router.post('/api/auth/local/change-password', async (req, res) => {
 });
 
 // RFC 9700 Seamless Bounce Entry Point
-function clearApexSessionCookie(req, res) {
+async function clearApexSessionCookie(req, res) {
   const cookies = parseCookies(req?.headers?.cookie || '');
   const existingToken = cookies.apex_session;
-  const existingSession = existingToken ? ssoSessions.get(existingToken) : null;
+  const existingSession = existingToken
+    ? (ssoSessions.get(existingToken) || (await db.getSession(existingToken)))
+    : null;
   if (existingToken) {
     ssoSessions.delete(existingToken);
+    await db.deleteSession(existingToken);
   }
   if (res && typeof res.setHeader === 'function') {
-    res.setHeader('Set-Cookie', 'apex_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+    const secureFlag = isHttpsRequest(req) ? '; Secure' : '';
+    res.setHeader('Set-Cookie', `apex_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureFlag}`);
   }
   return existingSession;
 }
 
 router.get('/auth/start', async (req, res) => {
-  clearApexSessionCookie(req, res);
+  await clearApexSessionCookie(req, res);
   if (req.query?.code && req.query?.state) {
     const qs = new URLSearchParams(req.query).toString();
     return res.redirect(`/api/auth/sso/callback?${qs}`);
@@ -637,7 +734,7 @@ router.get('/auth/start', async (req, res) => {
 
 router.get('/api/auth/sso/login', async (req, res) => {
   try {
-    clearApexSessionCookie(req, res);
+    await clearApexSessionCookie(req, res);
     const s = await db.getSystemSettings();
     const baseIssuer =
       s.break_glass_enabled === 'true'
@@ -674,7 +771,7 @@ router.get('/api/auth/sso/login', async (req, res) => {
 
 async function handleSsoCallback(req, res) {
   try {
-    clearApexSessionCookie(req, res);
+    await clearApexSessionCookie(req, res);
     const { code, state } = req.query || {};
     const stateStr = state ? String(state) : '';
     const pkce = stateStr ? pkceStore.get(stateStr) : null;
@@ -873,11 +970,17 @@ async function handleSsoCallback(req, res) {
       return false;
     });
 
+    const nowIso = new Date().toISOString();
     // JIT Auto-Provision verified AD/CIAM user if not yet in APEX users directory
     if (!userRecord) {
       const newUserId = verifiedSub || verifiedEmail.split('@')[0];
-      const isCiamAdmin = ['SUPER_ADMIN', 'ADMIN', 'admin'].includes(verifiedRole) ||
+      const isCiamAdmin =
+        ['SUPER_ADMIN', 'ADMIN', 'admin'].includes(verifiedRole) ||
         ['super_admin', 'admin'].includes(verifiedRole.toLowerCase());
+      const defaultProvisionRole = resolveRoleKeyFromCiam(s.ciam_auto_provision_group, null, 'viewer');
+      const assignedRole = isCiamAdmin
+        ? 'admin'
+        : (defaultProvisionRole === 'admin' ? 'viewer' : defaultProvisionRole);
       userRecord = {
         id: newUserId,
         uid: verifiedSub || newUserId,
@@ -885,8 +988,9 @@ async function handleSsoCallback(req, res) {
         external_id: verifiedSub || newUserId,
         name: verifiedName || verifiedSub || newUserId,
         title: verifiedDept || (isCiamAdmin ? 'ผู้ดูแลระบบ (Central IAM)' : 'พนักงาน (Central IAM)'),
+        department: verifiedDept || (isCiamAdmin ? 'IT Security' : 'Operations'),
         email: verifiedEmail || `${newUserId.toLowerCase()}@windowasia.com`,
-        role: isCiamAdmin ? 'admin' : 'viewer',
+        role: assignedRole,
         kind: 'internal',
         use_ad_auth: true,
         active: true,
@@ -895,7 +999,9 @@ async function handleSsoCallback(req, res) {
         projects: 'all',
         grant: [],
         deny: [],
-        createdAt: new Date().toISOString()
+        lastSeen: nowIso,
+        last_login_at: nowIso,
+        createdAt: nowIso
       };
       await db.setDoc('users', newUserId, userRecord, 'ciam-sso-jit');
       await db.insertAuditLog({
@@ -911,6 +1017,7 @@ async function handleSsoCallback(req, res) {
           email: verifiedEmail,
           department: verifiedDept,
           ciam_role: verifiedRole,
+          assigned_role: assignedRole,
           client_ip: getClientIp(req),
           ciam_origin_ip: verifiedCiamOriginIp
         }
@@ -940,14 +1047,33 @@ async function handleSsoCallback(req, res) {
       });
     }
 
+    await db.updateDoc(
+      'users',
+      userRecord.id,
+      {
+        lastSeen: nowIso,
+        last_login_at: nowIso,
+        ...(userRecord.username ? {} : { username: verifiedSub || userRecord.uid || userRecord.id }),
+        ...(verifiedDept && !userRecord.department ? { department: verifiedDept } : {})
+      },
+      userRecord.id
+    );
+
+    const ttlMinutes = Math.max(5, Number(s.ciam_session_ttl_minutes) || 480);
+    const maxAgeSeconds = ttlMinutes * 60;
     const sessionId = crypto.randomBytes(32).toString('hex');
-    ssoSessions.set(sessionId, {
+    const sessionPayload = {
       userId: userRecord.id,
       uid: userRecord.uid || verifiedSub || userRecord.id,
+      username: userRecord.username || verifiedSub || userRecord.uid || userRecord.id,
       email: userRecord.email || verifiedEmail,
       authMethod: 'ciam_sso',
-      authenticatedAt: new Date().toISOString()
-    });
+      mustChangePassword: false,
+      authenticatedAt: nowIso,
+      expiresAt: Date.now() + maxAgeSeconds * 1000
+    };
+    ssoSessions.set(sessionId, sessionPayload);
+    await db.saveSession(sessionId, sessionPayload);
 
     await db.insertAuditLog({
       eventCode: 'SSO-01',
@@ -966,10 +1092,7 @@ async function handleSsoCallback(req, res) {
       }
     });
 
-    res.setHeader(
-      'Set-Cookie',
-      `apex_session=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800`
-    );
+    res.setHeader('Set-Cookie', buildSessionCookie(req, sessionId, maxAgeSeconds));
     res.redirect((pkce && pkce.returnTo) || '/');
   } catch (err) {
     res.status(500).json({ error: 'callback_error', message: err.message });
@@ -981,7 +1104,7 @@ router.get('/auth/callback', handleSsoCallback);
 
 async function handleSsoLogout(req, res) {
   try {
-    const sess = clearApexSessionCookie(req, res);
+    const sess = await clearApexSessionCookie(req, res);
     const s = await db.getSystemSettings();
     const isAdUser = req.apexUser
       ? (req.apexUser.use_ad_auth === true || (req.apexUser.use_ad_auth === undefined && req.apexUser.kind !== 'external'))
@@ -1085,65 +1208,157 @@ async function verifyCiamManagementAuth(req, res, next) {
   next();
 }
 
+function formatDirectoryAccount(u) {
+  const isExternal = u.kind === 'external' || ['contractor', 'customer'].includes(u.role);
+  return {
+    id: u.id,
+    username: u.username || u.uid || u.id,
+    external_id: u.external_id || u.uid || u.id,
+    full_name: u.name,
+    name: u.name,
+    email: u.email || '',
+    department: u.department || u.title || '',
+    group_name: u.group_name || ROLE_DEF[u.role]?.l || u.role,
+    role: u.role,
+    kind: u.kind || (isExternal ? 'external' : 'internal'),
+    use_ad_auth: u.use_ad_auth ?? !isExternal,
+    is_active: u.active !== false,
+    is_status_locked: Boolean(u.is_status_locked),
+    status_origin: u.status_origin || 'LOCAL',
+    last_login_at: u.last_login_at || u.lastSeen || null,
+    last_seen: u.lastSeen || u.last_login_at || null,
+    created_at: u.createdAt || null,
+    updated_at: u.updatedAt || null
+  };
+}
+
 router.get('/api/v1/directory/accounts', verifyCiamManagementAuth, async (req, res) => {
   const users = await db.getCollection('users');
+  const statusFilter = String(req.query?.status || 'all').trim().toLowerCase();
+  const deptFilter = String(req.query?.department || '').trim().toLowerCase();
+  const searchFilter = String(req.query?.search || '').trim().toLowerCase();
+
+  const filtered = users.filter(u => {
+    const active = u.active !== false;
+    if (statusFilter === 'active' && !active) return false;
+    if (statusFilter === 'inactive' && active) return false;
+    if (deptFilter && !String(u.department || u.title || '').toLowerCase().includes(deptFilter)) {
+      return false;
+    }
+    if (searchFilter) {
+      const hay = [u.id, u.uid, u.username, u.name, u.email, u.department, u.title]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      if (!hay.includes(searchFilter)) return false;
+    }
+    return true;
+  });
+
+  const activeCount = users.filter(u => u.active !== false).length;
   res.json({
     app_code: 'apex',
-    total: users.length,
-    accounts: users.map(u => ({
-      id: u.id,
-      external_id: u.uid || u.id,
-      name: u.name,
-      email: u.email,
-      role: u.role,
-      kind: u.kind || 'internal',
-      use_ad_auth: u.use_ad_auth ?? u.kind !== 'external',
-      is_active: u.active !== false,
-      status_origin: u.status_origin || 'LOCAL',
-      last_seen: u.lastSeen || null
-    }))
+    application_name: 'APEX (Installation Control System)',
+    total: filtered.length,
+    total_accounts: users.length,
+    active_accounts: activeCount,
+    inactive_accounts: users.length - activeCount,
+    summary: {
+      total: users.length,
+      active: activeCount,
+      inactive: users.length - activeCount
+    },
+    accounts: filtered.map(formatDirectoryAccount)
   });
 });
 
 router.post('/api/v1/directory/accounts', verifyCiamManagementAuth, async (req, res) => {
   const b = req.body || {};
-  const id = b.id || b.external_id || 'U' + Date.now().toString(36).toUpperCase();
-  const kind = b.kind || (['contractor', 'customer'].includes(b.role) ? 'external' : 'internal');
+  const s = await db.getSystemSettings();
+  const users = await db.getCollection('users');
+
+  const rawUsername = String(b.username || b.external_id || b.id || '').trim();
+  const existing = findUserFlexible(users, rawUsername || b.email || '');
+  if (existing && !b.upsert) {
+    return res.status(409).json({
+      error: 'account_exists',
+      username: existing.username || existing.id,
+      message: `บัญชี '${rawUsername || existing.id}' มีอยู่ในระบบแล้ว`
+    });
+  }
+
+  const id = existing?.id || b.id || rawUsername || 'U' + Date.now().toString(36).toUpperCase();
+  const username = rawUsername || id;
+  const fallbackRole = resolveRoleKeyFromCiam(s.ciam_auto_provision_group, null, 'viewer');
+  const resolvedRole = resolveRoleKeyFromCiam(b.role, b.group_name, fallbackRole);
+  const kind = b.kind || (['contractor', 'customer'].includes(resolvedRole) ? 'external' : 'internal');
+  const nowIso = new Date().toISOString();
   const record = {
+    ...(existing || {}),
     id,
-    uid: b.external_id || id,
-    name: b.name || 'CIAM Provisioned User',
-    title: b.title || '',
-    email: b.email || '',
-    phone: b.phone || '',
-    role: b.role || 'viewer',
+    uid: b.external_id || username,
+    username,
+    external_id: b.external_id || username,
+    name: b.full_name || b.name || existing?.name || username || 'CIAM Provisioned User',
+    title: b.title || b.department || existing?.title || '',
+    department: b.department || b.title || existing?.department || '',
+    group_name: b.group_name || ROLE_DEF[resolvedRole]?.l || resolvedRole,
+    email: b.email || existing?.email || '',
+    phone: b.phone || existing?.phone || '',
+    role: resolvedRole,
     kind,
-    use_ad_auth: b.use_ad_auth ?? kind !== 'external',
+    use_ad_auth: b.use_ad_auth ?? existing?.use_ad_auth ?? kind !== 'external',
     active: b.is_active !== false,
+    is_active: b.is_active !== false,
     status_origin: 'CIAM',
-    projects: b.projects || (b.role === 'admin' ? 'all' : []),
-    team: b.team || '',
-    grant: b.grant || [],
-    deny: b.deny || [],
-    createdAt: new Date().toISOString()
+    projects: b.projects || existing?.projects || (resolvedRole === 'admin' ? 'all' : []),
+    team: b.team || existing?.team || '',
+    grant: b.grant || existing?.grant || [],
+    deny: b.deny || existing?.deny || [],
+    createdAt: existing?.createdAt || nowIso,
+    updatedAt: nowIso
   };
   await db.setDoc('users', id, record, 'ciam-push');
   await db.insertAuditLog({
     eventCode: 'DIR-PROVISION',
-    actorId: 'CIAM-HUB',
+    actorId: b.created_by || 'CIAM-HUB',
     ipAddress: getCiamOriginIp(req, { verifiedCiamFlow: true }),
     targetResource: `users/${id}`,
-    details: { role: record.role, use_ad_auth: record.use_ad_auth, is_active: record.active, client_ip: getClientIp(req) }
+    details: {
+      username,
+      role: record.role,
+      use_ad_auth: record.use_ad_auth,
+      is_active: record.active,
+      client_ip: getClientIp(req)
+    }
   });
-  res.status(201).json({ status: 'created', account: record });
+  res.status(existing ? 200 : 201).json({
+    success: true,
+    status: existing ? 'updated' : 'created',
+    id,
+    username,
+    account: formatDirectoryAccount(record)
+  });
 });
 
 router.put('/api/v1/directory/accounts/:id', verifyCiamManagementAuth, async (req, res) => {
-  const id = req.params.id;
-  const existing = await db.getDoc('users', id);
+  const users = await db.getCollection('users');
+  const existing = findUserFlexible(users, req.params.id);
   if (!existing) return res.status(404).json({ error: 'account_not_found' });
 
   const b = req.body || {};
+  if (
+    typeof b.is_active === 'boolean' &&
+    b.is_active !== (existing.active !== false) &&
+    existing.is_status_locked === true &&
+    !b.force_override
+  ) {
+    return res.status(409).json({
+      error: 'status_locked',
+      message: 'บัญชีนี้ถูกล็อคสิทธิ์เด็ดขาดโดย Central IAM (is_status_locked: true)'
+    });
+  }
+
   // True 2-Way Status Sync: If locally disabled (status_origin === 'LOCAL' && existing.active === false)
   // do not auto-enable unless explicit force_override is sent by CIAM Admin
   let nextActive = existing.active !== false;
@@ -1158,20 +1373,29 @@ router.put('/api/v1/directory/accounts/:id', verifyCiamManagementAuth, async (re
     }
   }
 
+  const nextRole = b.role || b.group_name ? resolveRoleKeyFromCiam(b.role, b.group_name, existing.role) : existing.role;
   const updated = await db.updateDoc(
     'users',
-    id,
+    existing.id,
     {
-      ...(b.name ? { name: b.name } : {}),
+      ...(b.full_name || b.name ? { name: b.full_name || b.name } : {}),
+      ...(b.username ? { username: b.username } : {}),
+      ...(b.department ? { department: b.department } : {}),
       ...(b.email ? { email: b.email } : {}),
-      ...(b.role ? { role: b.role } : {}),
+      ...(b.role || b.group_name ? { role: nextRole, group_name: b.group_name || ROLE_DEF[nextRole]?.l || nextRole } : {}),
       ...(typeof b.use_ad_auth === 'boolean' ? { use_ad_auth: b.use_ad_auth } : {}),
+      ...(typeof b.is_status_locked === 'boolean' ? { is_status_locked: b.is_status_locked } : {}),
       active: nextActive,
-      status_origin: nextOrigin
+      is_active: nextActive,
+      status_origin: nextOrigin,
+      updatedAt: new Date().toISOString()
     },
     'ciam-push'
   );
-  res.json({ status: 'updated', account: updated });
+  if (!nextActive) {
+    await revokeUserSessions(existing);
+  }
+  res.json({ status: 'updated', account: formatDirectoryAccount(updated) });
 });
 
 /**
@@ -1183,12 +1407,7 @@ router.patch('/api/v1/directory/accounts/:username/status', verifyCiamManagement
   try {
     const targetUsername = String(req.params.username || '').trim();
     const users = await db.getCollection('users');
-    const existing = users.find(
-      u =>
-        String(u.id || '').toLowerCase() === targetUsername.toLowerCase() ||
-        String(u.uid || '').toLowerCase() === targetUsername.toLowerCase() ||
-        (u.email && u.email.toLowerCase() === targetUsername.toLowerCase())
-    );
+    const existing = findUserFlexible(users, targetUsername);
 
     if (!existing) {
       return res.status(404).json({ error: 'account_not_found', message: `ไม่พบบัญชี ${targetUsername}` });
@@ -1218,11 +1437,12 @@ router.patch('/api/v1/directory/accounts/:username/status', verifyCiamManagement
       });
     }
 
-    const updated = await db.updateDoc(
+    await db.updateDoc(
       'users',
       existing.id,
       {
         active: is_active,
+        is_active: is_active,
         status_origin: 'CIAM',
         status_updated_at: new Date().toISOString()
       },
@@ -1231,11 +1451,7 @@ router.patch('/api/v1/directory/accounts/:username/status', verifyCiamManagement
 
     // If account deactivated, revoke all active sessions immediately (Spec C.3 & SSO-04)
     if (!is_active) {
-      for (const [sessId, sess] of ssoSessions.entries()) {
-        if (sess.userId === existing.id || sess.uid === existing.uid) {
-          ssoSessions.delete(sessId);
-        }
-      }
+      await revokeUserSessions(existing);
     }
 
     await db.insertAuditLog({
@@ -1254,7 +1470,7 @@ router.patch('/api/v1/directory/accounts/:username/status', verifyCiamManagement
     });
 
     res.json({
-      username: existing.id,
+      username: existing.username || existing.id,
       is_active,
       message: `Account status updated to ${is_active}`,
       updated_at: new Date().toISOString()
@@ -1274,7 +1490,118 @@ router.post('/api/settings/ciam-sso/sync-now', async (req, res) => {
       return res.status(403).json({ error: 'forbidden' });
     }
     const nowIso = new Date().toISOString();
-    const users = await db.getCollection('users');
+    const s = await db.getSystemSettings();
+    let users = await db.getCollection('users');
+
+    let syncMode = 'local-inventory';
+    let provisionedCount = 0;
+    let updatedCount = 0;
+    let remoteError = '';
+
+    const apiKey = s.ciam_management_api_key || s.ciam_client_secret || '';
+    if (s.ciam_enabled === 'true' && apiKey && s.ciam_issuer_url) {
+      const baseIssuer = String(s.ciam_issuer_url).replace(/\/+$/, '');
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      try {
+        const resp = await fetch(`${baseIssuer}/api/v1/agent/heartbeat`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            'X-Spoke-Client-ID': s.ciam_client_id || 'apex-spoke-client',
+            'X-Spoke-API-Key': apiKey,
+            'X-Request-Timestamp': String(Math.floor(Date.now() / 1000))
+          },
+          body: JSON.stringify({
+            app_code: s.app_code || 'apex',
+            status: 'HEALTHY',
+            sync_type: 'FULL_SYNC',
+            accounts: users.map(formatDirectoryAccount)
+          }),
+          signal: controller.signal
+        });
+        clearTimeout(timer);
+
+        if (resp.ok) {
+          syncMode = 'remote';
+          const payload = await resp.json().catch(() => ({}));
+          const assignedList = Array.isArray(payload.assigned_accounts) ? payload.assigned_accounts : [];
+          const pendingCommands = Array.isArray(payload.pending_commands) ? payload.pending_commands : [];
+
+          const fallbackRole = resolveRoleKeyFromCiam(s.ciam_auto_provision_group, null, 'viewer');
+
+          for (const acct of assignedList) {
+            const uname = String(acct.username || acct.external_id || '').trim();
+            if (!uname) continue;
+            const found = findUserFlexible(users, uname || acct.email);
+            if (!found) {
+              const rKey = resolveRoleKeyFromCiam(acct.role, acct.group_name, fallbackRole);
+              const isExt = ['contractor', 'customer'].includes(rKey);
+              const newDoc = {
+                id: uname,
+                uid: uname,
+                username: uname,
+                external_id: uname,
+                name: acct.full_name || acct.name || uname,
+                department: acct.department || '',
+                title: acct.department || 'พนักงาน (Central IAM)',
+                email: acct.email || '',
+                role: rKey,
+                kind: isExt ? 'external' : 'internal',
+                use_ad_auth: acct.use_ad_auth ?? !isExt,
+                active: acct.is_active !== false,
+                is_active: acct.is_active !== false,
+                status_origin: 'CIAM',
+                projects: rKey === 'admin' ? 'all' : [],
+                grant: [],
+                deny: [],
+                createdAt: nowIso
+              };
+              await db.setDoc('users', uname, newDoc, 'ciam-sync');
+              users.push(newDoc);
+              provisionedCount++;
+            }
+          }
+
+          for (const cmd of pendingCommands) {
+            const uname = String(cmd.username || '').trim();
+            const action = String(cmd.action || '').toUpperCase();
+            if (!uname || uname === 'ALL_ACCOUNTS') continue;
+            const target = findUserFlexible(users, uname);
+            if (action === 'DISABLE_USER' && target && target.id !== 'U01' && !target.is_status_locked) {
+              if (target.active !== false) {
+                await db.updateDoc(
+                  'users',
+                  target.id,
+                  { active: false, is_active: false, status_origin: 'CIAM', status_updated_at: nowIso },
+                  'ciam-sync'
+                );
+                await revokeUserSessions(target);
+                updatedCount++;
+              }
+            } else if (action === 'ENABLE_USER' && target && !target.is_status_locked) {
+              if (target.active === false && target.status_origin !== 'LOCAL') {
+                await db.updateDoc(
+                  'users',
+                  target.id,
+                  { active: true, is_active: true, status_origin: 'CIAM', status_updated_at: nowIso },
+                  'ciam-sync'
+                );
+                updatedCount++;
+              }
+            }
+          }
+          users = await db.getCollection('users');
+        } else {
+          remoteError = `HTTP ${resp.status}`;
+        }
+      } catch (netErr) {
+        clearTimeout(timer);
+        remoteError = netErr.message;
+      }
+    }
+
     await db.updateSystemSettings({ last_directory_sync_at: nowIso }, req.apexUser.id);
 
     await db.insertAuditLog({
@@ -1284,14 +1611,29 @@ router.post('/api/settings/ciam-sso/sync-now', async (req, res) => {
       actorRole: req.apexUser.role,
       ipAddress: getClientIp(req),
       targetResource: 'ciam_directory_sync',
-      details: { synced_accounts: users.length, synced_at: nowIso }
+      details: {
+        mode: syncMode,
+        synced_accounts: users.length,
+        provisioned: provisionedCount,
+        updated: updatedCount,
+        ...(remoteError ? { remote_note: remoteError } : {}),
+        synced_at: nowIso
+      }
     });
+
+    const msg =
+      syncMode === 'remote'
+        ? `ซิงค์ข้อมูลกับ Central IAM สำเร็จ (${users.length} บัญชี · สร้างใหม่ ${provisionedCount} · ปรับสถานะ ${updatedCount})`
+        : `บันทึกการตรวจสอบบัญชีผู้ใช้ในระบบ (${users.length} บัญชี)${remoteError ? ` — หมายเหตุ CIAM: ${remoteError}` : ''}`;
 
     res.json({
       status: 'ok',
+      mode: syncMode,
       synced_accounts: users.length,
+      provisioned: provisionedCount,
+      updated: updatedCount,
       synced_at: nowIso,
-      message: `ซิงค์ข้อมูลบัญชีผู้ใช้ (${users.length} บัญชี) กับระบบ Central IAM เรียบร้อยแล้ว`
+      message: msg
     });
   } catch (err) {
     res.status(500).json({ error: 'sync_error', message: err.message });
