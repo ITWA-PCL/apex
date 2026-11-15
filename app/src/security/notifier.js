@@ -392,11 +392,21 @@ async function sendEmailNotification({
         const timer = setTimeout(() => controller.abort(), 5000);
         const resp = await fetch(webhookUrl, {
           method: 'POST',
+          redirect: 'manual',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ to: recipient, from: fromAddr, subject, text, html }),
           signal: controller.signal
         });
         clearTimeout(timer);
+        if ((resp.status >= 300 && resp.status < 400) || resp.type === 'opaqueredirect') {
+          const location = resp.headers?.get ? resp.headers.get('location') : '';
+          throw new Error(
+            `Email webhook redirect forbidden (HTTP ${resp.status}${location ? ` -> ${location}` : ''}): refusing to redirect sensitive OTP payload`
+          );
+        }
+        if (resp.redirected || (resp.url && !/^https:\/\//i.test(resp.url))) {
+          throw new Error('Email webhook TLS required: redirected or non-HTTPS webhook target is forbidden');
+        }
         if (!resp.ok) {
           throw new Error(`Email webhook HTTP ${resp.status}`);
         }
@@ -607,7 +617,11 @@ async function createAndSendOtpChallenge(userDoc, purpose = 'login_2fa', ipAddre
       otp_attempts: 0,
       otp_purpose: purpose,
       ...(purpose === 'register'
-        ? { otp_password_verified_at: null, otp_password_verified_until: null }
+        ? {
+            otp_password_verified_at: null,
+            otp_password_verified_until: null,
+            otp_challenge_token_hash: null
+          }
         : {})
     },
     userDoc.id

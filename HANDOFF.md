@@ -8,23 +8,23 @@
 
 ## Latest Handoff Status (จุดพักงานล่าสุด — พร้อมกลับมาทำต่อได้ทันที)
 
-- **วันที่ / เวลาบันทึกส่งมอบ:** `2026-11-15 16:20 (+07:00)`
+- **วันที่ / เวลาบันทึกส่งมอบ:** `2026-11-15 16:42 (+07:00)`
 - **ผู้ส่งมอบงานล่าสุด:** Lead Security & Core Architect (คุณ — Track A ร่วมกับ Antigravity AI)
 - **ชื่อโปรเจกต์หลัก:** **APEX** (`https://apex.windowasia.com` — ระบบควบคุมงานติดตั้งประตู-หน้าต่าง)
 - **โฟลเดอร์หลักของโปรเจกต์บนเครื่อง Local (ทั้งเครื่องคุณและเครื่อง CFO):** **`D:\Python\APEX`**
 - **โฟลเดอร์ Production บน Hostinger VPS:** **`/var/www/Apex`**
 - **Git Remote ของบริษัท:** `https://github.com/ITWA-PCL/apex.git`
 - **Git Branch & Commit ล่าสุด:**
-  - Branch งาน Security ล่าสุดของคุณ (Track A): **`Sec1`** (ซิงค์ `origin/main` ที่ `e1d1d5d` via fast-forward และเพิ่มแพตช์ PR Review Hardening)
-  - **แพตช์ล่าสุดบน `Sec1` (Security Hardening: Password-First 2FA OTP, Purpose Binding & Mandatory SMTP/Webhook TLS):**
-    - `app/src/security/notifier.js`: บังคับ `STARTTLS` สำหรับพอร์ต SMTP ที่ไม่ใช่ 465 (ลบ silent fallback ออก และเช็ก `!isTlsEncrypted || !socket.encrypted` ก่อน `AUTH LOGIN`, `MAIL FROM`, `DATA` เสมอ), รองรับ Direct TLS พอร์ต 465 + `waitForTlsHandshake` + `rejectUnauthorized !== false`, บังคับ `https://` สำหรับ `email_webhook_url`, ล้าง `otp_password_verified_*` เมื่อขอ `'register'` OTP, และ export `sendSmtpMail` สำหรับทดสอบ
-    - `app/src/security/ciam.js`: บังคับ Pre-Auth Password Window (`otp_password_verified_until` 10 นาที) ใน `POST /api/auth/login` ก่อนอนุญาต `POST /api/auth/otp/request` (`login_2fa`) และ `POST /api/auth/otp/verify` (และล้างทันทีเมื่อกรอกรหัสผ่านผิด), บังคับ Purpose Binding (`400 otp_purpose_mismatch`) ห้ามนำ `login_2fa` OTP ใช้ใน `/api/auth/register-first-time` และห้ามนำ `register` OTP ใช้ใน `/api/auth/otp/verify`, ปิดช่องโหว่ขอ `'register'` OTP บนบัญชีที่ลงทะเบียนแล้ว (`403 already_registered`) และปฏิเสธ `purpose` ที่ไม่รู้จัก (`400 invalid_otp_purpose`)
-    - `app/src/security/rbac.js`: ลบ `otp_password_verified_at` และ `otp_password_verified_until` ออกจาก `sanitizeDocForResponse`
-    - `scripts/verify-local.js`: ขยาย **Section 12c** ทดสอบ Password-First 2FA OTP Guard, Failed Password Invalidation, OTP Purpose Mismatch ทั้ง 2 ทิศทาง และเพิ่ม **Section 12e** จำลอง Non-TLS Mock SMTP Server ยืนยันว่าไม่ส่ง `AUTH LOGIN`/รหัสผ่าน/`DATA`/OTP เมื่อไม่มี TLS และบล็อก `http://` Webhook
-  - **แพตช์ก่อนหน้าบน `Sec1` (PR #7 `e1d1d5d` & PR #6 `0c93d48`):** มาตรฐานบัญชี 3 ประเภท (`Internal · AD Only`, `Internal · Local`, `External · Local`), First-Time Invite/Register, Telegram Bot/Email/OTP Settings UI, Persistent Session `active_sessions`, Group C/D Spec C.1/C.2
+  - Branch งาน Security ล่าสุดของคุณ (Track A): **`Sec1`** (ซิงค์ `origin/main` ที่ `e1d1d5d` via fast-forward และปิดจุดเสี่ยง PR #8 Round 2 ครบทั้ง 2 ข้อ)
+  - **แพตช์ล่าสุดบน `Sec1` (PR #8 Hardening Round 2 — Per-Transaction Pre-Auth Token Binding & Webhook HTTPS Redirect Guard):**
+    - `app/src/security/ciam.js` & `app/public/js/ciam-admin-panel.js`: ผูกการยืนยัน Password และ 2FA OTP เข้าด้วยกันระดับ Client/Transaction ผ่าน `pre_auth_token` แบบสุ่ม 32-byte (`otp_challenge_token_hash` ใน DB + HttpOnly Cookie `apex_otp_challenge` + Field `pre_auth_token` ที่ส่งกลับ Client เดิมเท่านั้น), ตรวจสอบในทั้ง `POST /api/auth/otp/request` (`login_2fa`) และ `POST /api/auth/otp/verify` ป้องกันกรณี Client ที่ 2 นำ OTP ที่ได้ไปเข้าสู่ระบบโดยไม่ผ่านรหัสผ่านเอง และล้าง `apex_otp_challenge` + `otp_challenge_token_hash` ทันทีเมื่อสำเร็จหรือเมื่อกรอกรหัสผ่านผิด
+    - `app/src/security/rbac.js`: ลบ `otp_challenge_token_hash` ออกจาก `sanitizeDocForResponse` เพิ่มเติมจาก `otp_password_verified_at`/`until`
+    - `app/src/security/notifier.js`: ปรับ `fetch` ของ `email_webhook_url` ใช้ `redirect: 'manual'` พร้อมปฏิเสธ HTTP `300–399` (`307`/`308`ฯลฯ), `opaqueredirect`, และ `resp.redirected` / non-HTTPS เพื่อไม่ให้ Redirect ไปยัง `http://` แล้วทำข้อมูล OTP รั่วไหล, พร้อมล้าง `otp_challenge_token_hash` เมื่อออก `'register'` OTP
+    - `scripts/verify-local.js`: ขยาย **Section 12c** เพิ่ม 2-Client Isolation Tests (จำลอง Client 2 รู้ OTP จริงแต่ไม่มีหรือปลอม `pre_auth_token` -> โดนบล็อก `403 password_verification_required`) และขยาย **Section 12e** เพิ่มการทดสอบ HTTPS Webhook `307`/`308` Redirect ไป HTTP Server จำลองบน `127.0.0.1` (`httpLeakCount === 0`, zero OTP leak)
+  - **แพตช์ก่อนหน้าบน `Sec1` (`2e327ee` & PR #7 `e1d1d5d`):** Password-First Window, Purpose Binding (`400 otp_purpose_mismatch`), Mandatory SMTP TLS/STARTTLS, มาตรฐานบัญชี 3 ประเภท, First-Time Invite/Register, Telegram Bot/Email/OTP Settings UI
   - Branch ของ CFO (Track B): `feat/flow-cfo`
 - **สถานะการทดสอบ (Local Compile & Verification บน Branch `Sec1`):**
-  - `node scripts/verify-local.js`: **ผ่านครบถ้วน 100% (`0 Errors`)** (14 Syntax checks + Sections 1–12 รวมถึง 12c Password-First/Purpose Binding และ 12e SMTP/Webhook TLS)
+  - `node scripts/verify-local.js`: **ผ่านครบถ้วน 100% (`0 Errors`)** (14 Syntax checks + Sections 1–12 รวมถึง 2-Client Binding และ HTTPS 307/308 Redirect Guard)
 
 ---
 

@@ -553,9 +553,14 @@
 
         if (out.otp_required) {
           overlay.hidden = true;
-          renderLoginOtpModal(out.identifier || identifier, out.masked_email || '', () => {
-            window.location.reload();
-          });
+          renderLoginOtpModal(
+            out.identifier || identifier,
+            out.masked_email || '',
+            () => {
+              window.location.reload();
+            },
+            out.pre_auth_token || ''
+          );
           return;
         }
 
@@ -800,7 +805,7 @@
     });
   }
 
-  function renderLoginOtpModal(identifier, maskedEmail, onDone) {
+  function renderLoginOtpModal(identifier, maskedEmail, onDone, preAuthToken = '') {
     let modal = document.getElementById('apex-login-otp-modal');
     if (modal) modal.remove();
 
@@ -850,7 +855,7 @@
         const res = await fetch('/api/auth/otp/request', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ identifier, purpose: 'login_2fa' })
+          body: JSON.stringify({ identifier, purpose: 'login_2fa', pre_auth_token: preAuthToken })
         });
         const out = await res.json();
         if (!res.ok) {
@@ -873,7 +878,11 @@
         const res = await fetch('/api/auth/otp/verify', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ identifier, otp_code: codeInput.value.trim() })
+          body: JSON.stringify({
+            identifier,
+            otp_code: codeInput.value.trim(),
+            pre_auth_token: preAuthToken
+          })
         });
         const out = await res.json();
         if (!res.ok) {
