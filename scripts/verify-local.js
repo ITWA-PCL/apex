@@ -22,6 +22,7 @@ const filesToCheck = [
   'app/src/security/headers.js',
   'app/src/security/rbac.js',
   'app/src/security/ciam.js',
+  'app/src/security/notifier.js',
   'app/src/security/copilot.js',
   'app/src/workflow/finance-engine.js',
   'app/src/workflow/collections-api.js',
@@ -454,6 +455,976 @@ async function runVerification() {
     'Contractor must receive 403 when attempting to self-approve a claim'
   );
   console.log(' [OK] Post-Login RBAC, Privilege Escalation Prevention & Collection/Project Scoping verified');
+
+  // 10. Spec v2.12.0: In-App Bot Defense, 90-Day Forced Password Rotation & Local Complexity Verification
+  const headersMod = require('../app/src/security/headers');
+
+  // 10a. Layer 1 Bot Defense: Auth Rate Limiter (10 req / 60s + Whitelist + Retry-After)
+  const authLimiter = headersMod.createAuthRateLimiter({ limit: 10, windowMs: 60000 });
+  const testIp = '203.0.113.42'; // External untrusted IP
+  let limitedStatus = null;
+  let retryAfterHeader = null;
+  const mockResLimit = {
+    setHeader(k, v) {
+      if (k.toLowerCase() === 'retry-after') retryAfterHeader = v;
+    },
+    status(code) {
+      limitedStatus = code;
+      return this;
+    },
+    json() {
+      return this;
+    }
+  };
+
+  // 10 requests should pass through
+  for (let i = 1; i <= 10; i++) {
+    let passed = false;
+    authLimiter({ headers: { 'x-forwarded-for': testIp } }, mockResLimit, () => {
+      passed = true;
+    });
+    assert.strictEqual(passed, true, `Auth rate limiter must allow request #${i}`);
+  }
+  // 11th request must be rejected with 429 and Retry-After
+  let eleventhPassed = false;
+  authLimiter({ headers: { 'x-forwarded-for': testIp } }, mockResLimit, () => {
+    eleventhPassed = true;
+  });
+  assert.strictEqual(eleventhPassed, false, '11th auth request must be blocked by rate limiter');
+  assert.strictEqual(limitedStatus, 429, 'Auth rate limiter must return 429 Too Many Requests');
+  assert.ok(retryAfterHeader, 'Auth rate limiter must emit Retry-After header');
+
+  // Corporate Whitelist IP should never be blocked
+  for (let i = 1; i <= 25; i++) {
+    let wlPassed = false;
+    authLimiter({ headers: { 'x-forwarded-for': '157.173.219.153' } }, mockResLimit, () => {
+      wlPassed = true;
+    });
+    assert.strictEqual(wlPassed, true, 'Corporate Whitelist IP (157.173.219.153) must bypass rate limiter');
+  }
+
+  // 10b. Layer 2 Honeypot Decoy Trap & Layer 3 Timing Velocity Guard in /api/auth/login
+  async function invokeAuthLogin(body, clientIp = '127.0.0.1') {
+    return new Promise(resolve => {
+      const req = {
+        method: 'POST',
+        path: '/api/auth/login',
+        url: '/api/auth/login',
+        originalUrl: '/api/auth/login',
+        headers: { 'x-forwarded-for': clientIp },
+        body
+      };
+      const res = {
+        statusCode: 200,
+        headers: {},
+        body: null,
+        setHeader(k, v) {
+          this.headers[k] = v;
+        },
+        status(code) {
+          this.statusCode = code;
+          return this;
+        },
+        json(payload) {
+          this.body = payload;
+          resolve({ statusCode: this.statusCode, body: payload });
+          return this;
+        }
+      };
+      ciamRouter.handle(req, res, () => {
+        resolve({ statusCode: res.statusCode, body: res.body });
+      });
+    });
+  }
+
+  // Honeypot filled -> Silent 401 Rejection
+  const honeypotRes = await invokeAuthLogin({
+    identifier: 'C01',
+    password: 'SomePassword!1',
+    corporate_fax: 'spambot_fax_number'
+  });
+  assert.strictEqual(honeypotRes.statusCode, 401, 'Honeypot trap must reject with 401 Unauthorized');
+
+  // Timing Velocity Guard (< 400ms) -> 400 Bad Request
+  const tooFastRes = await invokeAuthLogin({
+    identifier: 'C01',
+    password: 'SomePassword!1',
+    form_render_ts: Date.now() - 100 // 100ms ago -> Bot automated submit
+  });
+  assert.strictEqual(tooFastRes.statusCode, 400, 'Velocity timing guard (< 400ms) must reject with 400 Bad Request');
+  assert.strictEqual(tooFastRes.body.code, 'BOT_TIMING_VIOLATION');
+
+  // 10c. Enterprise Password Complexity Standard (Spec v2.12.0 หมวด G.1)
+  const validateComplexity = ciamRouter.validatePasswordComplexity;
+  assert.ok(validateComplexity('short', 'somchai'), 'Must reject length < 8');
+  assert.ok(validateComplexity('ThisIsWayTooLongPasswordForSure12345!', 'somchai'), 'Must reject length > 16');
+  assert.ok(validateComplexity('alllowercase123!', 'somchai'), 'Must reject missing uppercase');
+  assert.ok(validateComplexity('ALLUPPERCASE123!', 'somchai'), 'Must reject missing lowercase');
+  assert.ok(validateComplexity('NoDigitsSpecial!', 'somchai'), 'Must reject missing digit');
+  assert.ok(validateComplexity('NoSpecialChar123', 'somchai'), 'Must reject missing special char');
+  assert.ok(validateComplexity('SomchaiPass123!', 'somchai'), 'Must reject username contained in password');
+  assert.strictEqual(validateComplexity('SecurePass!2026', 'somchai'), null, 'Valid 8-16 complex password must pass');
+
+  // 10d. 90-Day Forced Password Rotation Policy (STRICT RULE: Local Only, NEVER AD!)
+  const checkExpiry = ciamRouter.checkPasswordExpiry90Days;
+  const eightyNineDaysAgo = new Date(Date.now() - 89 * 86400000).toISOString();
+  const ninetyOneDaysAgo = new Date(Date.now() - 91 * 86400000).toISOString();
+
+  const notExpired = checkExpiry(eightyNineDaysAgo);
+  assert.strictEqual(notExpired.expired, false, '89 days old password must NOT be expired');
+  assert.strictEqual(notExpired.daysLeft, 1, '89 days old password should have 1 day left');
+
+  const expired = checkExpiry(ninetyOneDaysAgo);
+  assert.strictEqual(expired.expired, true, '91 days old password MUST be expired');
+  assert.strictEqual(expired.daysLeft, 0, '91 days old password must have 0 days left');
+
+  // Create Local Account C01 with 91 days old password
+  await db.updateDoc(
+    'users',
+    'C01',
+    {
+      password_hash: db.hashPassword('SubPass!222'),
+      use_ad_auth: false,
+      password_changed_at: ninetyOneDaysAgo,
+      must_change_password: false
+    },
+    'test'
+  );
+
+  // Login Local Account -> MUST require password change
+  const localLoginRes = await invokeAuthLogin({
+    identifier: 'C01',
+    password: 'SubPass!222',
+    form_render_ts: Date.now() - 2000
+  });
+  assert.strictEqual(localLoginRes.statusCode, 200, 'Local user login with valid credentials must succeed');
+  assert.strictEqual(
+    localLoginRes.body.must_change_password,
+    true,
+    'Local Account with password > 90 days MUST be flagged with must_change_password=true'
+  );
+
+  // Create AD Account A01 with 91 days old password -> MUST NEVER be flagged
+  await db.setDoc(
+    'users',
+    'A01',
+    {
+      id: 'A01',
+      uid: 'A01',
+      email: 'aduser@windowasia.com',
+      name: 'AD Corporate User',
+      role: 'foreman',
+      kind: 'internal',
+      use_ad_auth: true, // AD Account!
+      password_hash: db.hashPassword('AdPass!888'),
+      password_changed_at: ninetyOneDaysAgo,
+      must_change_password: false
+    },
+    'test'
+  );
+
+  const adLoginRes = await invokeAuthLogin({
+    identifier: 'A01',
+    password: 'AdPass!888',
+    form_render_ts: Date.now() - 2000
+  });
+  assert.strictEqual(adLoginRes.statusCode, 200, 'AD user login must succeed');
+  assert.strictEqual(
+    adLoginRes.body.must_change_password,
+    false,
+    'AD Account MUST NEVER be forced to rotate password or have must_change_password=true'
+  );
+  console.log(' [OK] Spec v2.12.0 Bot Defense & 90-Day Local Password Policy (Strict AD Exclusion) verified');
+
+  // 10e. CIAM Authority Lock (is_status_locked) on Directory Status API
+  await db.setDoc(
+    'users',
+    'LOCK01',
+    {
+      id: 'LOCK01',
+      uid: 'LOCK01',
+      email: 'locked@windowasia.com',
+      role: 'viewer',
+      active: true,
+      is_status_locked: true // Locked by CIAM Central Authority!
+    },
+    'test'
+  );
+
+  await db.updateSystemSettings({ ciam_management_api_key: 'test_mgmt_key_123' });
+
+  async function invokeDirectoryPatch(username, body) {
+    return new Promise(resolve => {
+      const req = {
+        method: 'PATCH',
+        path: `/api/v1/directory/accounts/${username}/status`,
+        url: `/api/v1/directory/accounts/${username}/status`,
+        originalUrl: `/api/v1/directory/accounts/${username}/status`,
+        headers: {
+          'x-management-api-key': 'test_mgmt_key_123',
+          'x-forwarded-for': '157.173.219.153'
+        },
+        params: { username },
+        body
+      };
+      const res = {
+        statusCode: 200,
+        headers: {},
+        body: null,
+        status(code) {
+          this.statusCode = code;
+          return this;
+        },
+        json(payload) {
+          this.body = payload;
+          resolve({ statusCode: this.statusCode, body: payload });
+          return this;
+        }
+      };
+      ciamRouter.handle(req, res, () => {
+        resolve({ statusCode: res.statusCode, body: res.body });
+      });
+    });
+  }
+
+  // Attempting status change on locked account without force_override must be rejected with 409
+  const lockedPatchRes = await invokeDirectoryPatch('LOCK01', { is_active: false });
+  assert.strictEqual(
+    lockedPatchRes.statusCode,
+    409,
+    'Status update on account with is_status_locked=true must be rejected with 409 Conflict'
+  );
+  assert.strictEqual(lockedPatchRes.body.error, 'status_locked');
+
+  // With force_override: true, authority override succeeds
+  const forcePatchRes = await invokeDirectoryPatch('LOCK01', { is_active: false, force_override: true });
+  assert.strictEqual(forcePatchRes.statusCode, 200, 'Authority override with force_override=true must succeed');
+  console.log(' [OK] Spec v2.12.0 CIAM Authority Lock (is_status_locked) & 1-Click Status API verified');
+
+  // 11. Enterprise User Management, Persistent Session DB, Complexity, Revocation & Group C Spec
+  async function invokeCiamReq(method, reqPath, { headers = {}, body = null, query = {} } = {}) {
+    return new Promise(resolve => {
+      const req = {
+        method,
+        path: reqPath,
+        url: reqPath,
+        originalUrl: reqPath,
+        query,
+        headers,
+        body
+      };
+      const res = {
+        statusCode: 200,
+        headers: {},
+        body: null,
+        setHeader(k, v) {
+          this.headers[k] = v;
+        },
+        status(code) {
+          this.statusCode = code;
+          return this;
+        },
+        json(payload) {
+          this.body = payload;
+          resolve({ statusCode: this.statusCode, headers: this.headers, body: payload });
+          return this;
+        }
+      };
+      ciamRouter.handle(req, res, () => {
+        resolve({ statusCode: res.statusCode, headers: res.headers, body: res.body });
+      });
+    });
+  }
+
+  // 11a. Login by username (case-insensitive) -> persistent DB session + last_login_at/lastSeen
+  await db.setDoc(
+    'users',
+    'USR_LOGIN_1',
+    {
+      id: 'USR_LOGIN_1',
+      uid: 'somchai.p',
+      username: 'somchai.p',
+      department: 'Engineering',
+      email: 'somchai.p@windowasia.com',
+      name: 'Somchai Test',
+      role: 'pm',
+      kind: 'internal',
+      projects: 'all',
+      active: true,
+      use_ad_auth: false,
+      password_hash: db.hashPassword('ApexPass#2026'),
+      password_changed_at: new Date().toISOString(),
+      must_change_password: false
+    },
+    'test'
+  );
+
+  const usernameLoginRes = await invokeCiamReq('POST', '/api/auth/login', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: {
+      identifier: 'SOMCHAI.P',
+      password: 'ApexPass#2026',
+      form_render_ts: Date.now() - 2000
+    }
+  });
+  assert.strictEqual(usernameLoginRes.statusCode, 200, 'Case-insensitive username login must succeed');
+  const setCookieHeader = usernameLoginRes.headers['Set-Cookie'] || usernameLoginRes.headers['set-cookie'] || '';
+  const cookieMatch = String(setCookieHeader).match(/apex_session=([^;]+)/);
+  assert.ok(cookieMatch && cookieMatch[1], 'Login response must issue apex_session cookie');
+  const persistedToken = cookieMatch[1];
+
+  const dbSession = await db.getSession(persistedToken);
+  assert.ok(dbSession, 'Session must be persisted to PostgreSQL / active_sessions fallback store');
+  assert.strictEqual(dbSession.userId, 'USR_LOGIN_1', 'Persisted DB session must point to USR_LOGIN_1');
+
+  const updatedUsr1 = await db.getDoc('users', 'USR_LOGIN_1');
+  assert.ok(updatedUsr1.last_login_at && updatedUsr1.lastSeen, 'Login must update last_login_at and lastSeen');
+
+  // Simulate process restart by clearing in-memory Map, verify resolveRequestUser recovers from DB
+  rbac.ssoSessions.delete(persistedToken);
+  await new Promise((resolve, reject) => {
+    const req = { headers: { cookie: `apex_session=${persistedToken}` } };
+    const res = {};
+    rbac.resolveRequestUser(req, res, err => {
+      if (err) return reject(err);
+      assert.ok(req.apexUser, 'resolveRequestUser must recover session from persistent DB after memory clear');
+      assert.strictEqual(req.apexUser.id, 'USR_LOGIN_1');
+      assert.strictEqual(req.apexUser.username, 'somchai.p');
+      resolve();
+    });
+  });
+
+  // 11b. Local User Management via /api/v1/db/users: complexity + duplicate username + audit + sanitization
+  const weakPwdCreate = await invokeCollectionsRoute('POST', '/api/v1/db/users', 'U01', {
+    id: 'USR_WEAK',
+    name: 'Weak User',
+    username: 'weak.user',
+    role: 'contractor',
+    kind: 'external',
+    company: 'Test Co',
+    team: 'T01',
+    projects: ['P01'],
+    use_ad_auth: false,
+    password: 'weak'
+  });
+  assert.strictEqual(weakPwdCreate.statusCode, 400, 'Weak password on POST /api/v1/db/users must be rejected');
+  assert.strictEqual(weakPwdCreate.body.error, 'complexity_violation');
+
+  const dupUsernameCreate = await invokeCollectionsRoute('POST', '/api/v1/db/users', 'U01', {
+    id: 'USR_DUP',
+    name: 'Dup Username',
+    username: 'SOMCHAI.P',
+    role: 'pm',
+    kind: 'internal',
+    projects: 'all',
+    use_ad_auth: true
+  });
+  assert.strictEqual(dupUsernameCreate.statusCode, 400, 'Duplicate username must be rejected');
+  assert.strictEqual(dupUsernameCreate.body.error, 'duplicate_username');
+
+  const validLocalCreate = await invokeCollectionsRoute('POST', '/api/v1/db/users', 'U01', {
+    id: 'USR_LOCAL_OK',
+    name: 'Valid Contractor',
+    username: 'contractor.k',
+    department: 'Subcon Team A',
+    email: 'contractor.k@example.com',
+    role: 'contractor',
+    kind: 'external',
+    company: 'Subcon Co.',
+    team: 'T01',
+    projects: ['P01'],
+    use_ad_auth: false,
+    password: 'TeamPass#889',
+    must_change_password: true
+  });
+  assert.strictEqual(validLocalCreate.statusCode, 201, 'Valid local user creation must succeed');
+  assert.strictEqual(validLocalCreate.body.data.has_password, true, 'Response must expose has_password=true');
+  assert.strictEqual(validLocalCreate.body.data.password_hash, undefined, 'Response must never expose password_hash');
+  assert.strictEqual(validLocalCreate.body.data.password, undefined, 'Response must never expose plaintext password');
+
+  // 11c. Deactivating user via PATCH /api/v1/db/users/:id revokes sessions & enforces is_status_locked
+  const deactivateRes = await invokeCollectionsRoute('PATCH', '/api/v1/db/users/USR_LOGIN_1', 'U01', {
+    active: false
+  });
+  assert.strictEqual(deactivateRes.statusCode, 200, 'Deactivating non-locked user must succeed');
+  assert.strictEqual(rbac.ssoSessions.has(persistedToken), false, 'In-memory session must be revoked on disable');
+  assert.strictEqual(await db.getSession(persistedToken), null, 'Persisted DB session must be revoked on disable');
+
+  const spokeLockAttempt = await invokeCollectionsRoute('PATCH', '/api/v1/db/users/LOCK01', 'U01', {
+    active: true
+  });
+  assert.strictEqual(spokeLockAttempt.statusCode, 409, 'Updating active status on CIAM-locked user must return 409');
+  assert.strictEqual(spokeLockAttempt.body.error, 'status_locked');
+
+  const logsAfterMgmt = await db.getAuditLogs(30);
+  assert.ok(logsAfterMgmt.some(l => l.event_code === 'USER-CREATE' && l.target_resource === 'users/USR_LOCAL_OK'), 'USER-CREATE audit log must be recorded');
+  assert.ok(logsAfterMgmt.some(l => l.event_code === 'SSO-04' && l.target_resource === 'users/USR_LOGIN_1'), 'SSO-04 revocation audit log must be recorded');
+  assert.ok(logsAfterMgmt.some(l => l.event_code === 'SPOKE_OVERRIDE_REJECTED' && l.target_resource === 'users/LOCK01'), 'SPOKE_OVERRIDE_REJECTED audit log must be recorded');
+
+  // 11d. Group C Directory API Spec C.1/C.2 (/api/v1/directory/accounts*)
+  const ciamPostAccount = await invokeCiamReq('POST', '/api/v1/directory/accounts', {
+    headers: {
+      'x-management-api-key': 'test_mgmt_key_123',
+      'x-forwarded-for': '157.173.219.153'
+    },
+    body: {
+      username: 'ciam.user1',
+      full_name: 'CIAM User One',
+      email: 'ciam.user1@windowasia.com',
+      department: 'IT',
+      group_name: 'qc',
+      is_active: true
+    }
+  });
+  assert.strictEqual(ciamPostAccount.statusCode, 201, 'Group C POST /api/v1/directory/accounts must create user');
+  assert.strictEqual(ciamPostAccount.body.account.username, 'ciam.user1');
+  assert.strictEqual(ciamPostAccount.body.account.group_name, 'qc');
+
+  const ciamPostDup = await invokeCiamReq('POST', '/api/v1/directory/accounts', {
+    headers: {
+      'x-management-api-key': 'test_mgmt_key_123',
+      'x-forwarded-for': '157.173.219.153'
+    },
+    body: {
+      username: 'ciam.user1',
+      full_name: 'Duplicate User',
+      group_name: 'viewer'
+    }
+  });
+  assert.strictEqual(ciamPostDup.statusCode, 409, 'Group C duplicate POST without upsert must return 409 Conflict');
+
+  const ciamListFiltered = await invokeCiamReq('GET', '/api/v1/directory/accounts', {
+    headers: {
+      'x-management-api-key': 'test_mgmt_key_123',
+      'x-forwarded-for': '157.173.219.153'
+    },
+    query: { status: 'active', department: 'IT' }
+  });
+  assert.strictEqual(ciamListFiltered.statusCode, 200, 'Group C filtered GET must return 200');
+  assert.ok(ciamListFiltered.body.summary && typeof ciamListFiltered.body.summary.total === 'number', 'Group C GET must return Spec C.1 summary');
+  assert.ok(
+    ciamListFiltered.body.accounts.some(a => a.username === 'ciam.user1' && a.department === 'IT'),
+    'Filtered Group C response must contain matching active IT department account'
+  );
+  assert.ok(
+    ciamListFiltered.body.accounts.every(a => a.is_active === true && String(a.department).toLowerCase().includes('it')),
+    'Filtered Group C response must exclude non-matching status/department accounts'
+  );
+  console.log(' [OK] Enterprise User Management, Persistent DB Session, Revocation & Group C Spec C.1/C.2 verified');
+
+  // 12. 3-Tier User Account Standardization, First-Time Invite/Register, 2FA OTP & Telegram/Email Settings
+  const notifier = require('../app/src/security/notifier');
+  async function invokeAdminCiamReq(method, reqPath, { headers = {}, body = null, query = {} } = {}) {
+    return new Promise(resolve => {
+      const hdrs = {
+        'x-forwarded-for': '127.0.0.1',
+        host: 'apex.windowasia.com',
+        ...Object.fromEntries(Object.entries(headers || {}).map(([k, v]) => [k.toLowerCase(), v]))
+      };
+      const req = {
+        method,
+        path: reqPath,
+        url: reqPath,
+        originalUrl: reqPath,
+        query,
+        headers: hdrs,
+        protocol: 'https',
+        get(h) {
+          return this.headers[String(h).toLowerCase()];
+        },
+        body,
+        apexAuthenticated: true,
+        apexUser: {
+          id: 'U01',
+          uid: 'admin',
+          email: 'admin@windowasia.com',
+          role: 'admin',
+          permissions: ['users']
+        }
+      };
+      const res = {
+        statusCode: 200,
+        headers: {},
+        body: null,
+        setHeader(k, v) {
+          this.headers[k] = v;
+        },
+        status(code) {
+          this.statusCode = code;
+          return this;
+        },
+        json(payload) {
+          this.body = payload;
+          resolve({ statusCode: this.statusCode, headers: this.headers, body: payload });
+          return this;
+        }
+      };
+      ciamRouter.handle(req, res, () => {
+        resolve({ statusCode: res.statusCode, headers: res.headers, body: res.body });
+      });
+    });
+  }
+
+  // 12a. 3-Tier User Standardization & AD-Only Guard
+  const extConCreate = await invokeCollectionsRoute('POST', '/api/v1/db/users', 'U01', {
+    id: 'EXT_CON_1',
+    name: 'Contractor Invite One',
+    username: 'ext.con1',
+    email: 'con1@contractor.co.th',
+    telegram_chat_id: '998877',
+    department: 'External Installers',
+    role: 'contractor',
+    kind: 'external',
+    company: 'SubCon Co',
+    team: 'T01',
+    projects: ['P2601'],
+    use_ad_auth: true, // Must be forced to false for external users
+    send_invite: true
+  });
+  assert.strictEqual(extConCreate.statusCode, 201, 'Creating external contractor with send_invite must return 201');
+  assert.strictEqual(extConCreate.body.data.use_ad_auth, false, 'External account must always force use_ad_auth=false');
+  assert.strictEqual(extConCreate.body.data.has_pending_invite, true, 'External account with send_invite must expose has_pending_invite=true');
+  assert.strictEqual(extConCreate.body.data.registration_status, 'pending_invite', 'Initial invite status must be pending_invite');
+  assert.ok(extConCreate.body.invite && /^\d{6}$/.test(extConCreate.body.invite.invite_otp), 'Invite response must include 6-digit OTP');
+  assert.ok(String(extConCreate.body.invite.registration_url || '').includes('register_token='), 'Invite response must include registration_url');
+
+  const extConGet = await invokeCollectionsRoute('GET', '/api/v1/db/users/EXT_CON_1', 'U01');
+  assert.strictEqual(extConGet.statusCode, 200);
+  assert.strictEqual(extConGet.body.data.invite_token_hash, undefined, 'Sanitized user doc must never leak invite_token_hash');
+  assert.strictEqual(extConGet.body.data.invite_otp_hash, undefined, 'Sanitized user doc must never leak invite_otp_hash');
+
+  const intAdCreate = await invokeCollectionsRoute('POST', '/api/v1/db/users', 'U01', {
+    id: 'INT_AD_ONLY',
+    name: 'Internal AD Only',
+    username: 'ad.only1',
+    email: 'adonly@windowasia.com',
+    department: 'QC',
+    role: 'qc',
+    kind: 'internal',
+    projects: 'all',
+    use_ad_auth: true,
+    password: 'ValidPass#123'
+  });
+  assert.strictEqual(intAdCreate.statusCode, 201, 'Creating internal AD user must return 201');
+  assert.strictEqual(intAdCreate.body.data.use_ad_auth, true);
+  assert.strictEqual(intAdCreate.body.data.has_password, false, 'AD user must strip local password_hash');
+  assert.strictEqual(intAdCreate.body.data.registration_status, 'active_ad', 'AD user must have registration_status=active_ad');
+
+  await db.updateSystemSettings({ ciam_enabled: 'true', break_glass_enabled: 'false' }, 'U01');
+  const adLoginBlocked = await invokeCiamReq('POST', '/api/auth/login', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: {
+      identifier: 'ad.only1',
+      password: 'ValidPass#123',
+      form_render_ts: Date.now() - 2000
+    }
+  });
+  await db.updateSystemSettings({ ciam_enabled: 'false', break_glass_enabled: 'false' }, 'U01');
+  assert.strictEqual(adLoginBlocked.statusCode, 403, 'AD-managed user must be rejected on local password login when SSO is active');
+  assert.strictEqual(adLoginBlocked.body.error, 'ad_sso_required');
+  const adAuditLogs = await db.getAuditLogs(20);
+  assert.ok(adAuditLogs.some(l => l.event_code === 'SSO-02' && l.target_resource === '/api/auth/login'), 'SSO-02 audit log must be recorded on AD local login block');
+
+  // 12b. First-Time Invite & Registration Flow
+  const pendingLoginRes = await invokeCiamReq('POST', '/api/auth/login', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: {
+      identifier: 'ext.con1',
+      password: 'AnyTempPassword#1',
+      form_render_ts: Date.now() - 2000
+    }
+  });
+  assert.strictEqual(pendingLoginRes.statusCode, 403, 'Passwordless pending Non-AD account must require first-time registration');
+  assert.strictEqual(pendingLoginRes.body.error, 'registration_required');
+
+  const sendInviteRes = await invokeAdminCiamReq('POST', '/api/v1/users/EXT_CON_1/send-invite');
+  assert.strictEqual(sendInviteRes.statusCode, 200, 'POST /api/v1/users/:id/send-invite must return 200');
+  assert.ok(/^\d{6}$/.test(sendInviteRes.body.invite_otp), 'send-invite must generate 6-digit invite_otp');
+  assert.ok(String(sendInviteRes.body.registration_url || '').includes('register_token='), 'send-invite must return registration_url');
+
+  const inviteAuditLogs = await db.getAuditLogs(20);
+  assert.ok(inviteAuditLogs.some(l => l.event_code === 'USER-INVITE' && l.target_resource === 'users/EXT_CON_1'), 'USER-INVITE audit log must be recorded');
+  assert.ok(inviteAuditLogs.some(l => l.event_code === 'NOTIFY-EMAIL'), 'NOTIFY-EMAIL audit log must be recorded');
+  assert.ok(inviteAuditLogs.some(l => l.event_code === 'NOTIFY-TELEGRAM'), 'NOTIFY-TELEGRAM audit log must be recorded');
+
+  const regCompleteRes = await invokeCiamReq('POST', '/api/auth/register-first-time', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: {
+      identifier: 'ext.con1',
+      token_or_otp: sendInviteRes.body.invite_otp,
+      new_password: 'NewContractor#99',
+      form_render_ts: Date.now() - 2000
+    }
+  });
+  assert.strictEqual(regCompleteRes.statusCode, 200, 'POST /api/auth/register-first-time with valid OTP must succeed');
+  const regSetCookie = regCompleteRes.headers['Set-Cookie'] || regCompleteRes.headers['set-cookie'] || '';
+  assert.ok(/apex_session=[^;]+/.test(String(regSetCookie)), 'First-time registration must issue apex_session cookie');
+
+  const extConAfterReg = await invokeCollectionsRoute('GET', '/api/v1/db/users/EXT_CON_1', 'U01');
+  assert.strictEqual(extConAfterReg.body.data.registration_status, 'registered');
+  assert.strictEqual(extConAfterReg.body.data.has_password, true);
+  assert.strictEqual(extConAfterReg.body.data.has_pending_invite, false);
+  const regAuditLogs = await db.getAuditLogs(20);
+  assert.ok(regAuditLogs.some(l => l.event_code === 'USER-REGISTER' && l.actor_id === 'EXT_CON_1'), 'USER-REGISTER audit log must be recorded');
+
+  // 12c. 2FA Login OTP Challenge, Password-First Guard & Purpose Binding
+  const enableOtpPatch = await invokeCollectionsRoute('PATCH', '/api/v1/db/users/EXT_CON_1', 'U01', {
+    otp_enabled: true
+  });
+  assert.strictEqual(enableOtpPatch.statusCode, 200);
+
+  // Must require password verification before requesting or verifying login_2fa OTP
+  const otpReqBeforePwd = await invokeCiamReq('POST', '/api/auth/otp/request', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'ext.con1', purpose: 'login_2fa' }
+  });
+  assert.strictEqual(otpReqBeforePwd.statusCode, 403, 'Requesting login_2fa OTP before password verification must fail with 403');
+  assert.strictEqual(otpReqBeforePwd.body.error, 'password_verification_required');
+
+  const otpVerifyBeforePwd = await invokeCiamReq('POST', '/api/auth/otp/verify', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'ext.con1', otp_code: '123456' }
+  });
+  assert.strictEqual(otpVerifyBeforePwd.statusCode, 403, 'Verifying 2FA OTP before password verification must fail with 403');
+  assert.strictEqual(otpVerifyBeforePwd.body.error, 'password_verification_required');
+
+  // Registered account must not be allowed to request a 'register' OTP
+  const registerOtpOnRegistered = await invokeCiamReq('POST', '/api/auth/otp/request', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'ext.con1', purpose: 'register' }
+  });
+  assert.strictEqual(registerOtpOnRegistered.statusCode, 403, 'Already-registered account must not obtain a register OTP');
+  assert.strictEqual(registerOtpOnRegistered.body.error, 'already_registered');
+
+  // Invalid purpose must be rejected
+  const invalidPurposeRes = await invokeCiamReq('POST', '/api/auth/otp/request', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'ext.con1', purpose: 'admin_bypass' }
+  });
+  assert.strictEqual(invalidPurposeRes.statusCode, 400, 'Invalid OTP purpose must fail with 400');
+  assert.strictEqual(invalidPurposeRes.body.error, 'invalid_otp_purpose');
+
+  // Step 1: Client 1 verifies valid password first via /api/auth/login -> 200 otp_required + per-transaction token/cookie
+  const otpLoginChallenge = await invokeCiamReq('POST', '/api/auth/login', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: {
+      identifier: 'ext.con1',
+      password: 'NewContractor#99',
+      form_render_ts: Date.now() - 2000
+    }
+  });
+  assert.strictEqual(otpLoginChallenge.statusCode, 200, '2FA OTP-enabled user login must return 200 challenge');
+  assert.strictEqual(otpLoginChallenge.body.otp_required, true, 'Login must require OTP step before session issuance');
+  assert.ok(otpLoginChallenge.body.pre_auth_token, 'Login challenge must issue per-transaction pre_auth_token');
+  const challengeSetCookie = String(otpLoginChallenge.headers['Set-Cookie'] || otpLoginChallenge.headers['set-cookie'] || '');
+  assert.strictEqual(/apex_session=/i.test(challengeSetCookie), false, 'No session cookie may be issued prior to OTP verification');
+  assert.ok(/apex_otp_challenge=/.test(challengeSetCookie), 'Login challenge must issue HttpOnly apex_otp_challenge cookie');
+  const client1PreAuthToken1 = otpLoginChallenge.body.pre_auth_token;
+
+  // Sanitized user doc must never leak pre-auth timestamps or challenge token hash
+  const extConSanitized = await invokeCollectionsRoute('GET', '/api/v1/db/users/EXT_CON_1', 'U01');
+  assert.strictEqual(extConSanitized.body.data.otp_password_verified_at, undefined);
+  assert.strictEqual(extConSanitized.body.data.otp_password_verified_until, undefined);
+  assert.strictEqual(extConSanitized.body.data.otp_challenge_token_hash, undefined);
+
+  const otpRequestRes = await invokeCiamReq('POST', '/api/auth/otp/request', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'ext.con1', purpose: 'login_2fa', pre_auth_token: client1PreAuthToken1 }
+  });
+  assert.strictEqual(otpRequestRes.statusCode, 200, 'POST /api/auth/otp/request with Client 1 pre_auth_token must succeed');
+  assert.ok(String(otpRequestRes.body.masked_email || '').includes('@'), 'OTP request must return masked_email');
+
+  // Purpose mismatch test 1: login_2fa OTP must NEVER be accepted by /api/auth/register-first-time
+  const loginOtpForMismatch = await notifier.createAndSendOtpChallenge(await db.getDoc('users', 'EXT_CON_1'), 'login_2fa', '127.0.0.1');
+  const mismatchRegisterRes = await invokeCiamReq('POST', '/api/auth/register-first-time', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: {
+      identifier: 'ext.con1',
+      token_or_otp: loginOtpForMismatch.otp_code,
+      new_password: 'HijackedPassword#99',
+      form_render_ts: Date.now() - 2000
+    }
+  });
+  assert.strictEqual(mismatchRegisterRes.statusCode, 400, 'login_2fa OTP must be rejected on /api/auth/register-first-time');
+  assert.strictEqual(mismatchRegisterRes.body.error, 'otp_purpose_mismatch');
+
+  // Failed password attempt must invalidate pending 2FA pre-auth state & token
+  const badPwdInvalidates = await invokeCiamReq('POST', '/api/auth/login', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: {
+      identifier: 'ext.con1',
+      password: 'WrongPassword#999',
+      form_render_ts: Date.now() - 2000
+    }
+  });
+  assert.strictEqual(badPwdInvalidates.statusCode, 401);
+
+  const otpVerifyAfterBadPwd = await invokeCiamReq('POST', '/api/auth/otp/verify', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'ext.con1', otp_code: loginOtpForMismatch.otp_code, pre_auth_token: client1PreAuthToken1 }
+  });
+  assert.strictEqual(otpVerifyAfterBadPwd.statusCode, 403, 'Wrong password must clear pre-auth OTP verification window & challenge token');
+  assert.strictEqual(otpVerifyAfterBadPwd.body.error, 'password_verification_required');
+
+  // Client 1 re-authenticates password properly -> receives bound pre_auth_token
+  const reAuthChallenge = await invokeCiamReq('POST', '/api/auth/login', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: {
+      identifier: 'ext.con1',
+      password: 'NewContractor#99',
+      form_render_ts: Date.now() - 2000
+    }
+  });
+  assert.strictEqual(reAuthChallenge.statusCode, 200);
+  assert.strictEqual(reAuthChallenge.body.otp_required, true);
+  const client1PreAuthToken2 = reAuthChallenge.body.pre_auth_token;
+  assert.ok(client1PreAuthToken2 && client1PreAuthToken2 !== client1PreAuthToken1, 'Each login transaction must generate a fresh pre_auth_token');
+
+  // 2-Client Isolation Tests: Client 2 (even knowing valid OTP!) cannot hijack Client 1's login transaction
+  const freshOtp = await notifier.createAndSendOtpChallenge(await db.getDoc('users', 'EXT_CON_1'), 'login_2fa', '127.0.0.1');
+
+  const client2NoTokenRes = await invokeCiamReq('POST', '/api/auth/otp/verify', {
+    headers: { 'x-forwarded-for': '203.0.113.88' },
+    body: { identifier: 'ext.con1', otp_code: freshOtp.otp_code }
+  });
+  assert.strictEqual(client2NoTokenRes.statusCode, 403, 'Client 2 without pre_auth_token must be blocked even with valid OTP');
+  assert.strictEqual(client2NoTokenRes.body.error, 'password_verification_required');
+  assert.strictEqual(client2NoTokenRes.headers['Set-Cookie'] || client2NoTokenRes.headers['set-cookie'], undefined);
+
+  const client2ForgedTokenRes = await invokeCiamReq('POST', '/api/auth/otp/verify', {
+    headers: { 'x-forwarded-for': '203.0.113.88' },
+    body: { identifier: 'ext.con1', otp_code: freshOtp.otp_code, pre_auth_token: 'forged_token_from_other_client_123456' }
+  });
+  assert.strictEqual(client2ForgedTokenRes.statusCode, 403, 'Client 2 with forged pre_auth_token must be blocked');
+  assert.strictEqual(client2ForgedTokenRes.body.error, 'password_verification_required');
+
+  const client2ReqOtpForgedRes = await invokeCiamReq('POST', '/api/auth/otp/request', {
+    headers: { 'x-forwarded-for': '203.0.113.88' },
+    body: { identifier: 'ext.con1', purpose: 'login_2fa', pre_auth_token: 'forged_token_from_other_client_123456' }
+  });
+  assert.strictEqual(client2ReqOtpForgedRes.statusCode, 403, 'Client 2 with forged pre_auth_token must not re-request login_2fa OTP');
+  assert.strictEqual(client2ReqOtpForgedRes.body.error, 'password_verification_required');
+
+  // Client 1 tests wrong OTP -> 401, then valid OTP + matching pre_auth_token -> 200 + apex_session cookie
+  const otpWrongRes = await invokeCiamReq('POST', '/api/auth/otp/verify', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'ext.con1', otp_code: '000000', pre_auth_token: client1PreAuthToken2 }
+  });
+  assert.strictEqual(otpWrongRes.statusCode, 401, 'Invalid OTP must be rejected with 401');
+
+  const client1ReqOtpOk = await invokeCiamReq('POST', '/api/auth/otp/request', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'ext.con1', purpose: 'login_2fa', pre_auth_token: client1PreAuthToken2 }
+  });
+  assert.strictEqual(client1ReqOtpOk.statusCode, 200, 'Client 1 with valid pre_auth_token must be able to re-request OTP');
+
+  const freshOtp2 = await notifier.createAndSendOtpChallenge(await db.getDoc('users', 'EXT_CON_1'), 'login_2fa', '127.0.0.1');
+  const otpVerifyOk = await invokeCiamReq('POST', '/api/auth/otp/verify', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'ext.con1', otp_code: freshOtp2.otp_code, pre_auth_token: client1PreAuthToken2 }
+  });
+  assert.strictEqual(otpVerifyOk.statusCode, 200, 'Client 1 with valid OTP + matching pre_auth_token must return 200');
+  const otpSetCookie = otpVerifyOk.headers['Set-Cookie'] || otpVerifyOk.headers['set-cookie'] || '';
+  assert.ok(/apex_session=[^;]+/.test(String(otpSetCookie)), 'Valid OTP verification must issue apex_session cookie');
+
+  // Purpose mismatch test 2: register OTP on pending account must NEVER be accepted by /api/auth/otp/verify
+  const pendingRegUser = await invokeCollectionsRoute('POST', '/api/v1/db/users', 'U01', {
+    id: 'EXT_PURPOSE_REG',
+    name: 'Pending Purpose Check',
+    username: 'ext.purpose.reg',
+    email: 'purpose@contractor.co.th',
+    department: 'External Installers',
+    role: 'contractor',
+    kind: 'external',
+    company: 'Purpose Co',
+    team: 'T01',
+    projects: ['P2601'],
+    use_ad_auth: false,
+    send_invite: false
+  });
+  assert.strictEqual(pendingRegUser.statusCode, 201);
+
+  const reqRegOtpRes = await invokeCiamReq('POST', '/api/auth/otp/request', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'EXT_PURPOSE_REG', purpose: 'register' }
+  });
+  assert.strictEqual(reqRegOtpRes.statusCode, 200, 'Requesting register OTP for pending user must succeed');
+
+  const mismatchVerifyRes = await invokeCiamReq('POST', '/api/auth/otp/verify', {
+    headers: { 'x-forwarded-for': '127.0.0.1' },
+    body: { identifier: 'EXT_PURPOSE_REG', otp_code: '123456' }
+  });
+  assert.strictEqual(mismatchVerifyRes.statusCode, 400, 'register OTP must be rejected on /api/auth/otp/verify');
+  assert.strictEqual(mismatchVerifyRes.body.error, 'otp_purpose_mismatch');
+
+  const otpLogs = await db.getAuditLogs(40);
+  assert.ok(otpLogs.some(l => l.event_code === 'OTP-SEND' && l.actor_id === 'EXT_CON_1'), 'OTP-SEND audit log must be recorded');
+  assert.ok(otpLogs.some(l => l.event_code === 'OTP-FAIL' && l.actor_id === 'EXT_CON_1'), 'OTP-FAIL audit log must be recorded');
+  assert.ok(otpLogs.some(l => l.event_code === 'OTP-VERIFY' && l.actor_id === 'EXT_CON_1'), 'OTP-VERIFY audit log must be recorded');
+
+  // 12d. Telegram & Email Notification Settings & Test Endpoints
+  const testTgSimRes = await invokeAdminCiamReq('POST', '/api/settings/notifications/test-telegram', { body: {} });
+  assert.strictEqual(testTgSimRes.statusCode, 200);
+  assert.strictEqual(testTgSimRes.body.simulated, true, 'Unconfigured test Telegram endpoint must cleanly return simulated=true');
+
+  const testEmailSimRes = await invokeAdminCiamReq('POST', '/api/settings/notifications/test-email', { body: {} });
+  assert.strictEqual(testEmailSimRes.statusCode, 200);
+  assert.strictEqual(testEmailSimRes.body.simulated, true, 'Unconfigured test Email endpoint must cleanly return simulated=true');
+
+  const saveNotifySettings = await invokeAdminCiamReq('POST', '/api/settings/ciam-sso', {
+    body: {
+      telegram_enabled: true,
+      telegram_bot_token: '123456:TEST_BOT_TOKEN_SECRET',
+      telegram_chat_id: '-100999888',
+      email_enabled: true,
+      smtp_host: 'smtp.windowasia.com',
+      smtp_port: 587,
+      smtp_user: 'noreply@windowasia.com',
+      smtp_password: 'SmtpSecret#123',
+      login_otp_external: true
+    }
+  });
+  assert.strictEqual(saveNotifySettings.statusCode, 200, 'Saving Telegram/Email settings must return 200');
+
+  const getNotifySettings = await invokeAdminCiamReq('GET', '/api/settings/ciam-sso');
+  assert.strictEqual(getNotifySettings.statusCode, 200);
+  assert.strictEqual(getNotifySettings.body.telegram_enabled, true);
+  assert.ok(getNotifySettings.body.telegram_bot_token_masked && !String(getNotifySettings.body.telegram_bot_token_masked).includes('TEST_BOT_TOKEN_SECRET'), 'Telegram bot token must be masked in GET response');
+  assert.strictEqual(getNotifySettings.body.email_enabled, true);
+  assert.ok(getNotifySettings.body.smtp_password_masked && !String(getNotifySettings.body.smtp_password_masked).includes('SmtpSecret#123'), 'SMTP password must be masked in GET response');
+  assert.strictEqual(getNotifySettings.body.login_otp_external, true);
+
+  await invokeAdminCiamReq('POST', '/api/settings/ciam-sso', {
+    body: {
+      telegram_enabled: false,
+      telegram_chat_id: '',
+      email_enabled: false,
+      smtp_host: '',
+      login_otp_external: false
+    }
+  });
+  await db.updateSystemSettings({ telegram_bot_token: '', smtp_password: '' }, 'U01');
+
+  // 12e. SMTP Must Not Transmit Secrets Without TLS & Webhook Must Require HTTPS
+  const net = require('net');
+  let smtpTranscript = '';
+  const mockSmtpServer = net.createServer(sock => {
+    let rxBuf = '';
+    sock.write('220 mock.local ESMTP\r\n');
+    sock.on('data', chunk => {
+      const textChunk = chunk.toString('utf8');
+      smtpTranscript += textChunk;
+      rxBuf += textChunk;
+      const lines = rxBuf.split(/\r?\n/);
+      rxBuf = lines.pop() || '';
+      for (const line of lines) {
+        if (/^EHLO /i.test(line)) {
+          sock.write('250-mock.local\r\n250 PIPELINING\r\n');
+        } else if (/^STARTTLS/i.test(line)) {
+          sock.write('502 5.5.1 STARTTLS not supported\r\n');
+        }
+      }
+    });
+  });
+
+  await new Promise(resolve => mockSmtpServer.listen(0, '127.0.0.1', resolve));
+  const mockPort = mockSmtpServer.address().port;
+  try {
+    let smtpError = null;
+    try {
+      await notifier.sendSmtpMail({
+        host: '127.0.0.1',
+        port: mockPort,
+        user: 'smtp_user',
+        password: 'SuperSecretSmtpPassword!99',
+        from: 'noreply@windowasia.com',
+        to: 'target@example.com',
+        subject: 'Secret OTP',
+        text: 'OTP: 654321'
+      });
+    } catch (err) {
+      smtpError = err;
+    }
+    assert.ok(smtpError && /SMTP TLS required/i.test(smtpError.message), 'SMTP without TLS/STARTTLS must abort with SMTP TLS required');
+    assert.strictEqual(/AUTH LOGIN/i.test(smtpTranscript), false, 'AUTH LOGIN must never be sent without TLS');
+    assert.strictEqual(smtpTranscript.includes(Buffer.from('SuperSecretSmtpPassword!99', 'utf8').toString('base64')), false, 'SMTP password must never be sent without TLS');
+    assert.strictEqual(/MAIL FROM:|DATA/i.test(smtpTranscript), false, 'Mail envelope/body must never be sent without TLS');
+    assert.strictEqual(smtpTranscript.includes('654321'), false, 'Sensitive OTP content must never be sent without TLS');
+  } finally {
+    await new Promise(resolve => mockSmtpServer.close(resolve));
+  }
+
+  await db.updateSystemSettings({ email_webhook_url: 'http://insecure.example.com/hook' }, 'U01');
+  const insecureWebhookRes = await notifier.sendEmailNotification({
+    to: 'target@example.com',
+    subject: 'Secret OTP',
+    text: 'OTP: 654321',
+    forceTest: true
+  });
+  await db.updateSystemSettings({ email_webhook_url: '' }, 'U01');
+  assert.strictEqual(insecureWebhookRes.ok, false, 'Non-HTTPS email webhook must be rejected');
+  assert.strictEqual(insecureWebhookRes.status, 'failed');
+  assert.ok(/TLS required|https/i.test(insecureWebhookRes.message), 'Webhook failure must report HTTPS/TLS requirement');
+
+  // HTTPS Webhook 307/308 redirect to HTTP must NEVER be followed or leak OTP payload
+  const http = require('http');
+  let httpLeakCount = 0;
+  let httpLeakedBody = '';
+  const leakHttpServer = http.createServer((req, res) => {
+    httpLeakCount += 1;
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString('utf8');
+    });
+    req.on('end', () => {
+      httpLeakedBody += body;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"leaked":true}');
+    });
+  });
+
+  await new Promise(resolve => leakHttpServer.listen(0, '127.0.0.1', resolve));
+  const httpLeakPort = leakHttpServer.address().port;
+  const origFetch = globalThis.fetch;
+  try {
+    for (const redirStatus of [307, 308]) {
+      const targetUrl = `https://secure-webhook.windowasia.test/email-${redirStatus}`;
+      globalThis.fetch = async (url, init = {}) => {
+        if (String(url) === targetUrl) {
+          if (init.redirect !== 'manual') {
+            return origFetch(`http://127.0.0.1:${httpLeakPort}/leaked`, {
+              method: init.method || 'POST',
+              headers: init.headers,
+              body: init.body
+            });
+          }
+          return new Response(null, {
+            status: redirStatus,
+            headers: { location: `http://127.0.0.1:${httpLeakPort}/leaked` }
+          });
+        }
+        return origFetch(url, init);
+      };
+
+      await db.updateSystemSettings({ email_webhook_url: targetUrl }, 'U01');
+      const redirRes = await notifier.sendEmailNotification({
+        to: 'target@example.com',
+        subject: 'OTP',
+        text: 'OTP: 998877',
+        forceTest: true
+      });
+      assert.strictEqual(redirRes.ok, false, `HTTPS webhook HTTP ${redirStatus} redirect must fail`);
+      assert.strictEqual(redirRes.status, 'failed');
+      assert.ok(/redirect forbidden/i.test(redirRes.message), `Must reject ${redirStatus} redirect cleanly`);
+    }
+    assert.strictEqual(httpLeakCount, 0, 'Redirected HTTP target must NEVER receive request');
+    assert.strictEqual(httpLeakedBody.includes('998877'), false, 'OTP secret must NEVER be leaked to redirected HTTP target');
+  } finally {
+    globalThis.fetch = origFetch;
+    await db.updateSystemSettings({ email_webhook_url: '' }, 'U01');
+    await new Promise(resolve => leakHttpServer.close(resolve));
+  }
+  console.log(' [OK] 3-Tier Users, 2-Client Pre-Auth Binding, Purpose Binding, SMTP/Webhook TLS & Redirect Guard verified');
 
   console.log('=================================================================');
   console.log(' ✅ ALL LOCAL COMPILE & SECURITY/FINANCE CHECKS PASSED (0 ERRORS)');

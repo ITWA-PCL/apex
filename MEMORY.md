@@ -64,18 +64,31 @@
 
 ---
 
-## 4. กฎด้านความปลอดภัยและ CIAM v2.9.0 (Security & CIAM Rules)
+## 4. กฎด้านความปลอดภัยและ CIAM v2.12.0 (Security & CIAM Standards)
 
 1. **โดเมนและ Callback ของ APEX:**
    - Production Origin: `https://apex.windowasia.com`
-   - SSO Start Endpoint: `https://apex.windowasia.com/auth/start`
+   - SSO Start Endpoint: `https://apex.windowasia.com/auth/start` (RFC 9700 Seamless Bounce)
    - SSO Callback Endpoint: `https://apex.windowasia.com/api/auth/sso/callback`
 2. **Audit Log Codes ที่ต้องบันทึกใน `transaction_logs`:**
    - `SSO-01`: ล็อกอินผ่าน Central IAM สำเร็จ
    - `SSO-02`: ล็อกอินล้มเหลว / Token ไม่ถูกต้อง
    - `SSO-03`: ออกจากระบบ (Logout)
-   - `SSO-04`: บล็อกการเข้าสู่ระบบเนื่องจากบัญชีถูกระงับ (`is_active == false`)
+   - `SSO-04`: บล็อกการเข้าสู่ระบบเนื่องจากบัญชีถูกระงับ (`is_active == false`) หรือ 1-Click Offboarding
    - `BG-01` / `BG-02`: เปิด/ปิดโหมดฉุกเฉิน Break-Glass (`http://172.18.0.1:3100`)
    - `CFG-01`: แก้ไขค่าตั้งต้น CIAM / AI Copilot ในตาราง `system_settings`
-3. **IP Whitelist สำหรับ Push Provisioning (Group C):**
+   - `IP_RATE_LIMITED`: ปฏิเสธคำขอเข้าสู่ระบบถี่เกิน 10 req/60s
+   - `BOT_HONEYPOT_DETECTED`: ปฏิเสธบอทที่กรอกฟิลด์ดัก `corporate_fax` หรือ `security_honey`
+   - `BOT_TIMING_VIOLATION`: ปฏิเสธสคริปต์ที่ส่งข้อมูลเร็วกว่า 400ms (< 0.4 วินาที)
+   - `PW_CHANGE`: บันทึกการเปลี่ยนรหัสผ่านของ Local Account (มีผล 90 วัน)
+   - `SPOKE_OVERRIDE_REJECTED`: ปฏิเสธการแก้สถานะบัญชีที่ถูกล็อคโดย CIAM Authority Lock (`is_status_locked`)
+3. **Enterprise In-App Bot Defense 3 ชั้น (หมวด F):**
+   - Layer 1: Sliding-Window IP Rate Limiter 10 requests / 60 seconds (ยกเว้น Corporate Whitelist)
+   - Layer 2: Decoy Honeypot Trap (`corporate_fax`, `security_honey`)
+   - Layer 3: Timing Velocity Guard (< 400ms rejection)
+4. **กฎเหล็กการเปลี่ยนรหัสผ่านทุก 90 วันและความซับซ้อน (หมวด G):**
+   - **บังคับใช้กับ Local Account (`use_ad_auth: false` หรือ Local Admin) เท่านั้น!**
+   - **ห้ามทำกับ Active Directory Account (`use_ad_auth: true`) โดยเด็ดขาด 100%!**
+   - ความซับซ้อน: 8–16 ตัวอักษร, มีตัวพิมพ์ใหญ่ (A-Z) $\ge$ 1, ตัวพิมพ์เล็ก (a-z) $\ge$ 1, ตัวเลข (0-9) $\ge$ 1, อักขระพิเศษ $\ge$ 1, และห้ามมี Username ในรหัสผ่าน
+5. **IP Whitelist สำหรับ Push Provisioning (Group C):**
    - อนุญาตเฉพาะ IP ของ Central IAM Server (`157.173.219.153` หรือค่าที่ตั้งไว้ใน `system_settings.ciam_allowed_ips`) พร้อม Header `X-Management-API-Key`

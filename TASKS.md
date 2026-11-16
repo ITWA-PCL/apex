@@ -2,7 +2,7 @@
 
 > **Project:** **APEX** (`https://apex.windowasia.com`)
 > **Repository:** `https://github.com/ITWA-PCL/apex.git`
-> **Updated:** 2026-11-04 16:10 (+07:00)
+> **Updated:** 2026-11-15 13:26 (+07:00)
 > **Status Legend:** `[x]` Completed | `[/]` In Progress | `[ ]` Pending
 
 ---
@@ -40,6 +40,8 @@
 - [x] **T2.6 [Track A]** ระบบบันทึก Audit Trail (`transaction_logs`) ครบทุกรหัส (`SSO-01`–`SSO-04`, `BG-01`–`BG-02`, `CFG-01`, `SYNC-01`, `DATA-DELETE`)
 - [x] **T2.7 [Track A]** ระบบ In-App AI Copilot (`app/src/security/copilot.js` — Group E Read-Only 100%, `ZERO_TRAINING_PRIVACY_HEADERS`, DLP Scrubber `sanitizeContextForPrivacy`)
 - [ ] **T2.8 [Track A]** ทดสอบเชื่อมต่อกับเซิร์ฟเวอร์ Central IAM จริง (`https://ciam.windowasia.com`) ด้วย Client ID & Secret จริงของบริษัท
+- [x] **T2.9 [Track A]** ยกระดับระบบ User Management, Authentication & Session Lifecycle ตามมาตรฐานสากลและ CIAM Spoke v2.9.0/v2.12.0 (Persistent Session `active_sessions`, Username Login & Break-Glass AD Gateway, Responsive Login Gate, Self-Service Password, Local User Provisioning + Complexity/Revocation/Status Lock, Group C/D Spec C.1/C.2/D.2)
+- [x] **T2.10 [Track A]** มาตรฐานบัญชี 3 ประเภท (`Internal · AD Only`, `Internal · Local`, `External · Local`), คำเชิญลงทะเบียนครั้งแรก (`USER-INVITE` / `USER-REGISTER`), ระบบ 2FA OTP (`OTP-SEND` / `OTP-VERIFY` / `OTP-FAIL`), และหน้าตั้งค่าแจ้งเตือน **Telegram Bot & Email / SMTP** (`NOTIFY-TELEGRAM` / `NOTIFY-EMAIL`) ตาม ISO/IEC 27001:2022 & CIAM Framework (`app/src/security/notifier.js`)
 
 ---
 

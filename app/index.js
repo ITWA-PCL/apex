@@ -57,12 +57,46 @@ app.use(copilotRouter);
 // 6. Mount Track B (CFO): 22 Collections Real-Time API, SSE & Financial Engine
 app.use(collectionsRouter);
 
-// 7. Serve PWA Static Assets & Application Shell (app/public)
+// 7. Intercept OIDC callback params on root or client routes before static index.html
+function forwardOAuthParamsToCallback(req, res) {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(req.query || {})) {
+    if (Array.isArray(v)) {
+      v.forEach(item => params.append(k, String(item)));
+    } else if (v !== undefined && v !== null) {
+      params.set(k, String(v));
+    }
+  }
+  if (!params.has('_sso_orig_path')) {
+    params.set('_sso_orig_path', req.path || '/');
+  }
+  return res.redirect(`/api/auth/sso/callback?${params.toString()}`);
+}
+
+app.use((req, res, next) => {
+  if (
+    req.method === 'GET' &&
+    req.query &&
+    req.query.code &&
+    req.query.state &&
+    !req.path.startsWith('/api/auth/sso/callback') &&
+    !req.path.startsWith('/auth/callback') &&
+    !req.path.startsWith('/auth/start')
+  ) {
+    return forwardOAuthParamsToCallback(req, res);
+  }
+  next();
+});
+
+// Serve PWA Static Assets & Application Shell (app/public)
 const publicDir = path.join(__dirname, 'public');
 app.use(express.static(publicDir));
 
 // Fallback to PWA index.html for client-side routes
 app.get('*', (req, res) => {
+  if (req.query && req.query.code && req.query.state) {
+    return forwardOAuthParamsToCallback(req, res);
+  }
   res.sendFile(path.join(publicDir, 'index.html'));
 });
 

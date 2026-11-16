@@ -57,6 +57,7 @@ postgres-data/
 redis-data/
 uploads/
 tmp/
+app/data/
 
 # Docker & Build Artifacts
 .docker/
