@@ -12,13 +12,14 @@
 
 เมื่อคุณ (Claude Code) ทำงานบนเครื่องของ **CFO (Business Process Lead — Track B)**:
 1. **ผู้ใช้เป็น Non-Tech Executive (CFO)** ที่เชี่ยวชาญกระบวนการธุรกิจ การเงิน บัญชี (POC / Cashflow / ใบเบิกงวดช่าง 8 ขั้นตอน) และเป็นผู้ออกแบบต้นฉบับ `Docs/install-tracker_26.html` แต่ **ไม่ได้เป็นโปรแกรมเมอร์**
-2. **ห้ามขอให้ผู้ใช้พิมพ์คำสั่ง Terminal, Git, หรือติดตั้งโปรแกรมเองเด็ดขาด!**
+2. **ห้ามขอให้ผู้ใช้พิมพ์คำสั่ง Git เอง** — Claude จัดการขั้นตอนเทคนิคให้
    - เครื่องของ CFO มี **Claude Code** และ **Google Chrome** ติดตั้งอยู่แล้ว
-   - หากเครื่องยังไม่มี `git`, `gh` (GitHub CLI), หรือ `node` (Node.js LTS) **คุณ (Claude Code) ต้องเป็นคนรันคำสั่ง `winget install` ติดตั้งให้ทั้งหมดอัตโนมัติ** (โดยมีเจ้าหน้าที่ IT ช่วยกดยืนยันหน้าต่าง Administrator ถ้าระบบถาม)
+   - หากเครื่องยังไม่มี `git`, `node` (Node.js LTS) หรือเครื่องมืออื่น **ห้ามติดตั้งหรือเปลี่ยนการตั้งค่าเครื่องอัตโนมัติ** ให้แจ้ง CFO / IT สั้น ๆ ว่าขาดอะไร (แทนที่คำสั่ง `winget install` อัตโนมัติเดิม ตาม AGENTS.md หัวข้อ 4)
 3. **นโยบายอีเมล GitHub ของ CFO (Personal Email Allowed):**
    - CFO สามารถใช้อีเมลส่วนตัวใดก็ได้ (เช่น `@gmail.com`, `@hotmail.com`, `@outlook.com`) ในการสมัครและใช้งาน GitHub เพื่อความสะดวกและเพื่อให้บัญชี GitHub นั้นเป็นสมบัติติดตัวของ CFO ตลอดไป แม้ในอนาคตจะไม่ได้ทำงานร่วมกับ Window Asia (WA) แล้วก็ตาม (เนื่องจากสิทธิ์การเข้าถึงโค้ด `ITWA-PCL/apex` ควบคุมผ่าน Collaborator Permission ของ Repository)
 4. **โฟลเดอร์ทำงานหลักบนเครื่อง Local:**
-   - ต้องอยู่ที่ **`D:\Python\APEX`** เสมอ (ห้ามสร้างไว้ใน `Drive C:` เพื่อประหยัดพื้นที่ `Drive C:`)
+   - ตรวจ Git repository root ของโฟลเดอร์ที่เปิดอยู่จริงทุกครั้ง อย่าเดาว่าต้องเป็น `D:\Python\APEX` (เครื่อง CFO ปัจจุบันอยู่ที่ `D:\Git\apex`) หากไม่ใช่ repo `ITWA-PCL/apex` ให้หยุดและแจ้ง IT ไม่ clone หรือสร้าง repo ใหม่อัตโนมัติ
+   - ควรอยู่บน `Drive D:` เพื่อประหยัดพื้นที่ `Drive C:`
 5. **การสื่อสาร:**
    - สื่อสารกับผู้ใช้ด้วย **ภาษาไทยที่เข้าใจง่าย กระชับ เน้นผลลัพธ์ทางธุรกิจและหน้าจอการใช้งาน**
 
@@ -47,15 +48,12 @@
 
 ## 🔄 3. MANDATORY SESSION STARTUP PROTOCOL (ทำอัตโนมัติทุกครั้งที่เปิดโปรแกรม)
 
-ทุกครั้งที่เริ่มต้นบทสนทนาใหม่ หรือเมื่อผู้ใช้พิมพ์ว่า **"เริ่มงานวันนี้"** คุณต้องทำ 4 ขั้นตอนนี้อัตโนมัติทันที:
+ทุกครั้งที่เริ่มต้นบทสนทนาใหม่ หรือเมื่อผู้ใช้พิมพ์ว่า **"เริ่มงานวันนี้"** ทำตาม **AGENTS.md หัวข้อ 4 (CFO / Track B)** ดังนี้:
 
-1. **เข้าไปที่ `D:\Python\APEX` และดึงโค้ดล่าสุดจากเซิร์ฟเวอร์กลางของบริษัท:**
-   ```powershell
-   cd D:\Python\APEX
-   git fetch origin
-   git checkout feat/flow-cfo 2>$null; if ($LASTEXITCODE -ne 0) { git checkout -b feat/flow-cfo origin/develop }
-   git pull origin develop --no-edit
-   ```
+1. **ตรวจ repo และงานค้างก่อน แล้วจึงอัปเดตแบบปลอดภัย:**
+   - ตรวจ repository root, remote (`ITWA-PCL/apex` เท่านั้น), branch ปัจจุบัน (`feat/flow-cfo`), `git status` ทั้ง tracked/untracked และ merge/rebase ที่ค้าง
+   - หากมีงานค้างที่ไม่ใช่ของ session นี้ หรือไม่อยู่บน `feat/flow-cfo` ให้หยุดแจ้ง IT ห้าม stash / reset / clean
+   - `git fetch origin` แล้วอัปเดตกิ่ง `feat/flow-cfo` จาก remote ได้เฉพาะแบบ fast-forward เท่านั้น **ไม่ pull `develop` อัตโนมัติ** (คำสั่ง `git pull origin develop` และการสร้างกิ่งจาก `develop` เดิมยกเลิกแล้ว)
 2. **อ่านไฟล์สมองของระบบทั้ง 5 ไฟล์ตามลำดับ:**
    - `HANDOFF.md` (ดูว่าล่าสุดทีม Security/IT หรือเรามีการส่งมอบงานอะไรไว้)
    - `MEMORY.md` (ดูกฎเหล็กทางธุรกิจและการคำนวณการเงิน)
@@ -90,28 +88,24 @@
 
 ---
 
-## 🧪 5. MANDATORY PRE-PUSH LOCAL COMPILE, CACHE CLEANUP & CLOSE PROTOCOL (กฎเหล็กก่อนส่งงานขึ้น Git)
+## 🧪 5. CFO DELIVERY PROTOCOL — "ส่งงาน" (Push-only ตาม AGENTS.md หัวข้อ 4)
 
-ทุกครั้งที่แก้ไขโค้ดเสร็จ หรือเมื่อผู้ใช้พิมพ์ว่า **"จบงานวันนี้"** / **"ส่งโค้ดขึ้นระบบ"**:
+**จบ session ≠ ส่งงาน:** ไม่ commit / push อัตโนมัติเมื่อจบงาน ทำเฉพาะเมื่อ CFO สั่ง **"ส่งงาน"** หรืออนุญาตส่งงานส่วนที่ระบุชัดเจน
+(คำสั่งเดิมที่ให้ส่งทุกครั้งที่จบ session, `git add` ทั้งโฟลเดอร์ และ `node scripts/open-pr.js` อัตโนมัติ ยกเลิกแล้ว — ไม่ได้เปลี่ยนสคริปต์ของทีมเทคนิค)
 
-1. **ต้อง Compile และรันชุดทดสอบอัตโนมัติบนเครื่อง Local ว่าไม่มี Error 100% ก่อนเสมอ:**
+เมื่อ CFO สั่ง "ส่งงาน":
+1. ตรวจ repository root, remote และ branch อีกครั้ง ต้องเป็น `feat/flow-cfo` เท่านั้น ตรวจ tracked/untracked/staged diff แยกงานของ session นี้ออกจากงานเดิม ไม่แน่ใจที่มาให้หยุด
+2. `git fetch origin` หาก remote นำหน้าหรือประวัติแยกกัน ให้หยุดให้ทีมเทคนิคช่วย ไม่ rebase / force-push
+3. ทบทวน diff ว่าอยู่ในเขต Track B ไม่มีข้อมูลลับ อัปเดต `HANDOFF.md`, `TASK.md`, `TASKS.md`
+4. **รัน `node scripts/verify-local.js` และการทดสอบที่ตรงกับส่วนที่แก้** — หาก fail หรือรันไม่ได้ ห้าม push ให้หยุดรายงาน (ไม่แก้ security/scripts เพื่อให้ผ่าน)
+5. Stage ทีละไฟล์ด้วยชื่อชัดเจน ตรวจ `git diff --cached` แล้ว commit เช่น `feat(flow): add payment approval step`
+6. Dry-run แล้วจึง push ด้วย refspec ชัดเจน และยืนยัน SHA กับ remote จริง:
    ```powershell
-   cd D:\Python\APEX
-   node scripts/verify-local.js
+   git -c push.followTags=false push --dry-run origin HEAD:refs/heads/feat/flow-cfo
+   git -c push.followTags=false push origin HEAD:refs/heads/feat/flow-cfo
+   git rev-parse HEAD
+   git ls-remote --heads origin refs/heads/feat/flow-cfo
    ```
-   - **หากพบ Error แม้แต่จุดเดียว ห้าม `git push` เด็ดขาด!** ต้องซ่อมจนกว่า `node scripts/verify-local.js` จะขึ้น `100% PASSED` ก่อน
-2. **ล้างขยะ Cache และ Unused Images เพื่อคืนพื้นที่ให้ Drive C: เสมอ:**
-   ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File "D:\Python\APEX\scripts\cleanup-cache.ps1"
-   ```
-3. **อัปเดตเอกสารส่งมอบงานเสมอ:**
-   - อัปเดตสถานะงานใน **`TASKS.md`** และ **`TASK.md`** ให้ตรงกัน
-   - เขียนสรุปสิ่งที่ทำเสร็จในวันนี้ลงใน **`HANDOFF.md`** (ระบุวันที่ เวลา ผู้ส่งมอบ: CFO / Track B และก้าวต่อไป)
-4. **Commit, Push ขึ้นกิ่งของ CFO (`feat/flow-cfo`), และเปิดใบขออนุมัติ (Pull Request) อัตโนมัติ:**
-   ```powershell
-   git add app/src/workflow/ app/public/index.html HANDOFF.md TASKS.md TASK.md MEMORY.md PRD.md
-   git commit -m "feat(flow): <สรุปสิ่งที่แก้ไขสั้นๆ>"
-   git push -u origin feat/flow-cfo
-   node scripts/open-pr.js
-   ```
-   *(คำสั่ง `node scripts/open-pr.js` จะสร้างใบ Pull Request ส่งไปให้ Admin กด Approve บนหน้าเว็บ GitHub อัตโนมัติทันที ห้าม Push ตรงเข้ากิ่ง `main` เด็ดขาด)*
+7. หยุดหลังรายงาน **ไม่รัน `scripts/open-pr.js` ไม่เปิด PR ไม่ merge ไม่ deploy** ทีมเทคนิคจัดการ PR / CI / review / merge / deploy เอง
+
+การล้าง cache (`scripts/cleanup-cache.ps1`) ลบ Docker images ที่ไม่ได้ใช้ทั้งเครื่อง — รันเมื่อ CFO อนุญาตเท่านั้น

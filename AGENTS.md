@@ -79,3 +79,24 @@
    - หน้าจอ สี ฟอนต์ (`Sarabun` + `JetBrains Mono`) การจัดวาง โมดอล และแบบฟอร์มพิมพ์ `F-00`–`F-18` ต้องอ้างอิงตามต้นฉบับ `Docs/install-tracker_26.html` อย่างเคร่งครัด รองรับทั้ง Desktop และ Mobile PWA
 6. **Weekly Cache Hygiene:**
    - ต้องดูแลให้สคริปต์ `scripts/cleanup-cache.ps1` (Windows) และ `scripts/cleanup-cache.sh` (Linux Cloud) พร้อมทำงานทุกสัปดาห์เพื่อล้าง Docker build cache, dangling images, Next.js `.next/cache`, และ Python cache ไม่ให้เกิดขยะสะสม
+
+---
+
+## 4. CFO / Track B — Local Work and Push-only Delivery
+
+> กติกาหัวข้อนี้ใช้แทนคำสั่ง "เริ่มงาน / ส่งงาน" เดิมของ CFO เท่านั้น ไม่เปลี่ยนกติกาของ Track A และ Security Invariants ด้านบน
+> ที่มา: `APEX-CFO-CLAUDE-SETUP.md` (ระยะที่ 1 ตั้งค่า 2026-11-04)
+
+1. CFO ทำงานเฉพาะกิ่ง `feat/flow-cfo` ใน `ITWA-PCL/apex` ตรวจ repository root, remote และ branch จริงก่อนแก้หรือส่งงานทุกครั้ง (ไม่ยึด path ตายตัว ให้ตรวจโฟลเดอร์ที่เปิดอยู่จริง)
+2. เริ่ม session: อ่านคำสั่งและเอกสารส่งมอบ ตรวจ working tree ก่อน fetch / switch / synchronize ไม่แตะงานเดิมที่ไม่ใช่งานของ session นี้ ไม่ stash / reset / clean อัตโนมัติ หากมีงานค้างที่ไม่ชัดเจนให้หยุดให้ IT ช่วย ไม่ pull `develop` อัตโนมัติ การนำ `main` มารวมในกิ่งที่มีงานแล้วให้ทีมเทคนิควางแผน
+3. CFO บอกความต้องการและทดสอบผลทางธุรกิจ Claude จัดการขั้นตอนเทคนิค ไม่ต้องให้ CFO พิมพ์ Git
+4. งาน Track B ครอบคลุม `app/src/workflow/` และส่วนธุรกิจใน `app/public/index.html` เอกสารที่เกี่ยวข้องแก้ได้ตามงาน ห้ามแก้ Track A ได้แก่ security/auth/RBAC, database infrastructure, deployment, workflows และ scripts โดยไม่มีการประสานและอนุญาตเพิ่มเติม
+5. `app/public/index.html` เป็นไฟล์ร่วม ต้องรักษาส่วนเชื่อม authentication/security (เช่น `js/apex-cloud-bridge.js`, `js/ciam-admin-panel.js`, Login Gate) ไม่ลบการตรวจสิทธิ์เพื่อให้ Flow ทำงาน หากต้องเปลี่ยน API หรือสิทธิ์ให้แจ้งทีมเทคนิค
+6. ส่งงานเป็นส่วนย่อยที่ตรวจสอบได้ ไม่ต้องรอให้ Flow ทั้งระบบเสร็จ แต่ห้ามอ้างว่าพร้อม production จากผล local tests เพียงอย่างเดียว
+7. ไม่ commit หรือ push เพียงเพราะ session จบ ทำได้เมื่อ CFO สั่ง **"ส่งงาน"** หรืออนุญาตส่งงานส่วนที่ระบุอย่างชัดเจนเท่านั้น
+8. ก่อนส่ง: ตรวจ diff เลือกไฟล์ที่ตั้งใจทีละไฟล์ อัปเดต `HANDOFF.md` / `TASK.md` / `TASKS.md` รัน `node scripts/verify-local.js` และการทดสอบที่ตรงกับส่วนที่แก้ หาก fail หรือรันไม่ได้ให้หยุดและรายงาน ไม่ลดมาตรฐานหรือแก้ security / scripts เองเพื่อให้ผ่าน
+9. Push เฉพาะ commit ที่ทดสอบแล้วจาก `feat/flow-cfo` ไป `origin` ด้วย refspec ชัดเจน: dry-run ก่อนด้วย `git -c push.followTags=false push --dry-run origin HEAD:refs/heads/feat/flow-cfo` แล้วจึง `git -c push.followTags=false push origin HEAD:refs/heads/feat/flow-cfo` และยืนยัน SHA จริงด้วย `git ls-remote --heads origin refs/heads/feat/flow-cfo` ห้าม force / `--all` / `--tags` / `--mirror` และห้ามใช้ `--no-verify`
+10. ไม่รัน `scripts/open-pr.js` ไม่เปิดหรือแก้ PR ไม่ merge ไม่ deploy ไม่เปลี่ยนสิทธิ์หรือการตั้งค่าความปลอดภัย ทีมเทคนิคเป็นผู้ดำเนินการต่อ (ไม่มีระบบแจ้งทีมเทคนิคอัตโนมัติ)
+11. รายงานเป็นภาษาไทย: scope, branch, commit SHA, ผลทดสอบ, push สำเร็จหรือไม่, สิ่งที่ค้าง และข้อมูลส่งต่อทีมเทคนิค ห้ามอ้างว่า merge / deploy แล้ว
+
+**เครื่องของ CFO:** ไม่ติดตั้งโปรแกรม ไม่เปลี่ยนค่าระบบ (เช่น `npm config set --global`, Git config, credential) และไม่รันสคริปต์ที่ลบ Docker images / cache ทั้งเครื่องโดยอัตโนมัติ — ทำได้เมื่อ CFO หรือ IT อนุญาตเป็นครั้ง ๆ ไป
